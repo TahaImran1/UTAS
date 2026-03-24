@@ -22,7 +22,7 @@ except ImportError as e:
     print(f"[!] Warning: Could not import zk.db: {e}")
     db = None
 
-app = FastAPI(title="ZK ADMS Server")
+app = FastAPI(title="UTAS")
 
 # --- CONFIGURATION ---
 SERVER_IP = "0.0.0.0" 
@@ -102,7 +102,7 @@ async def view_logs():
     html = """
     <html>
     <head>
-        <title>ZK Attendance Logs</title>
+        <title>ZKTeco Attendance Logs</title>
         <meta http-equiv="refresh" content="5"> 
         <style>
             body { font-family: sans-serif; padding: 20px; }
@@ -114,7 +114,7 @@ async def view_logs():
         </style>
     </head>
     <body>
-        <h1>Live Attendance Logs (FastAPI Mode)</h1>
+        <h1>Live Attendance Logs (UTAS Mode)</h1>
         <p><i>Auto-refreshing every 5 seconds...</i></p>
         <table>
             <tr>
@@ -187,5 +187,5 @@ async def device_cmd():
 
 if __name__ == "__main__":
     import uvicorn
-    log(f"[*] Starting FASTAPI ADMS Server on {SERVER_IP}:{SERVER_PORT}")
+    log(f"[*] Starting UTAS Server on {SERVER_IP}:{SERVER_PORT}")
     uvicorn.run(app, host=SERVER_IP, port=SERVER_PORT)
