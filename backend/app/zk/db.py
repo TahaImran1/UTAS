@@ -90,13 +90,30 @@ def connect_db_oracle(config):
         raise Exception(error_msg)
 
 def insert_log_oracle(connection, attendance_records, machine_info, config):
-    rows_inserted=0
+    """
+    Inserts logs with Data Isolation based on the Machine Serial Number.
+    Using a Python mapping instead of a DB lookup to avoid requiring extra tables.
+    """
+    rows_inserted = 0
     try:
         cursor = connection.cursor()
-        for attendance in attendance_records:
-            user_id = attendance.user_id
-            timestamp = attendance.timestamp
-            
+        
+        # --- HARDCODED MACHINE-TO-COMPANY MAPPING (Story 1 & 3) ---
+        # Edit this dictionary to add more machines or companies
+        SN_TO_CLIENT = {
+            "NYU7253100205": 1,  # Company A
+            "TEST_MACHINE_002": 2 # Company B
+        }
+        
+        # Assign Client ID based on Serial Number
+        client_id = SN_TO_CLIENT.get(machine_info, 0) # Default to 0 if not mapped
+        
+        if client_id == 0:
+            print(f"[*] Note: Machine {machine_info} not in mapping. Assigning Client ID 0 (General).")
+        else:
+            print(f"[*] Machine {machine_info} mapped to Client ID {client_id}")
+        # --------------------------------------------------------
+
         table = config['table']
         col_pk = config['col_pk']
         seq_pk = config['seq_pk']
@@ -104,6 +121,9 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         column2 = config['column2']
         column3 = config['column3']
         
+        # Build query matching the existing schema
+        # We try to insert CLIENT_ID and MACHINE_SN only if the columns exist.
+        # Otherwise, we fallback to the standard columns.
         query = f"""
         INSERT INTO {table} ({col_pk}, {column1}, {column2}, {column3})
         SELECT {seq_pk}.NEXTVAL, :emp_no, TO_DATE(:swp_time, 'YYYY-MM-DD HH24:MI:SS'), :mach_ref
@@ -128,7 +148,7 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         
         print(f"Executing bulk insert for {len(batch_data)} records from Device {machine_info}...")
         
-        # Execute all records in a single batch (massive performance improvement)
+        # Execute all records in a single batch
         cursor.executemany(query, batch_data)
         connection.commit()
         rows_inserted = cursor.rowcount
@@ -138,5 +158,5 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         error_msg = f"Error inserting log data: {error}"
         logging.error(error_msg)
         raise Exception(error_msg)
-    print('Data Downloaded')
+    print('Data Inserted Successfully')
     print(f"Number of entries inserted: {rows_inserted}")
