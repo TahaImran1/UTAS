@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+oracledb
+python-dotenv
+waitress
+flask
