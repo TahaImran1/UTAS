@@ -24,3 +24,14 @@ database.json
 # Ignore proposals
 *.pdf
 legacy_integration_proposal.pdf
+
+# ── Node.js & React Frontend ──
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-final/
+frontend/UTAS_Desktop/
+frontend/--win32-x64/
+*.exe
+*.zip
+.vite/
