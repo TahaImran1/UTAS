@@ -18,13 +18,36 @@ def install_requirements():
 install_requirements()
 # ────────────────────────────────────────────────────────────────────────────
 
-from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from collections import deque
 
 load_dotenv()
+
+# --- SECURITY CONFIG ---
+SECRET_KEY = os.getenv("JWT_SECRET", "super-secret-key-123")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 1 day
+
+# Initialize DB
+db = None
+try:
+    from .zk import db
+except ImportError:
+    pass
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+ADMIN_USERNAME = os.getenv("ADMIN_USER", "admin")
+# Default password is 'admin123' if not set in .env
+ADMIN_PASS_HASH = os.getenv("ADMIN_PASS_HASH", "$2b$12$HsX55kfXFpUGdXatBVl48OaojBm56HI0ZntORMuokZ0ISM/is.kh2")
 
 # ── Path setup ───────────────────────────────────────────────────────────────
 sys.path.append(os.path.dirname(__file__))
@@ -39,19 +62,51 @@ except ImportError as e:
 from pull_engine import pull_manager
 import machines_config
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# --- LOG TRACKING FOR UI ---
+class DequeHandler(logging.Handler):
+    def __init__(self, maxlen=100):
+        super().__init__()
+        self.logs = deque(maxlen=maxlen)
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.logs.append({
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "level": record.levelname,
+            "msg": msg
+        })
+
+log_buffer = DequeHandler()
+log_buffer.setFormatter(logging.Formatter("%(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s %(name)s — %(message)s",
+    format="[%(asctime)s] %(levelname)s — %(message)s",
     datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("utas")
+logger.addHandler(log_buffer)
 
-# ── App ───────────────────────────────────────────────────────────────────────
+from contextlib import asynccontextmanager
+
+# ── Lifespan context manager ──────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    logger.info("[UTAS] Server starting — initialising pull engine...")
+    pull_manager.start()
+    
+    yield
+    
+    # Shutdown logic
+    logger.info("[UTAS] Server shutting down — disconnecting devices...")
+    pull_manager.stop()
+
 app = FastAPI(
     title="UTAS — Unified Time Attendance System",
     description="ZKTeco ADMS push server + pyzk pull engine",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # Allow Electron frontend on any local origin
@@ -68,32 +123,57 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", 4370))
 RECENT_LOGS = []
 
 
+# ── Auth Utilities ───────────────────────────────────────────────────────────
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return username
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+class ControlIn(BaseModel):
+    action: str # "start" or "stop"
+
 class MachineIn(BaseModel):
     ip: str
     port: int = 4370
     location: str = ""
     password: int = 0
     sn: str = ""
-
-
+    protocol: str = "TCP" # TCP or HTTP
+    company_name: str = "None"
 class TestConnectionIn(BaseModel):
     ip: str
     port: int = 4370
     password: int = 0
 
-
-# ── Lifespan events ───────────────────────────────────────────────────────────
-@app.on_event("startup")
-async def startup():
-    logger.info("[UTAS] Server starting — initialising pull engine...")
-    pull_manager.start()
+class CompanyMapIn(BaseModel):
+    company_name: str
+    sns: list[str]
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    logger.info("[UTAS] Server shutting down — disconnecting devices...")
-    pull_manager.stop()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,9 +183,49 @@ async def shutdown():
 def log(msg):
     print(f"[{datetime.datetime.now()}] {msg}")
 
+def register_push_device(sn: str, ip: str):
+    """Auto-detect and add new push devices to the registry."""
+    if not sn:
+        return
+    
+    # Register pulse heartbeat
+    pull_manager.update_pulse(sn)
+
+    # Check if already registered
+    existing = pull_manager.get_machine(sn=sn)
+    if not existing:
+        logger.info(f"[AUTODETECT] New Push device found: SN={sn} from IP={ip}")
+        try:
+            m = MachineIn(
+                ip=ip,
+                sn=sn,
+                location="Auto-Detected (Push)",
+                port=4370,
+                password=0,
+                protocol="HTTP",
+                company_name="None"
+            )
+            pull_manager.add_machine(m.model_dump())
+        except Exception as e:
+            logger.error(f"[AUTODETECT] Failed to register {sn}: {e}")
+    else:
+        # BUG FIX: Force update protocol to HTTP if it's currently TCP/None for a push device
+        if existing.get("protocol") != "HTTP":
+            pull_manager.update_machine_metadata(sn, "HTTP", existing.get("company_name", "None"))
+            logger.info(f"[AUTODETECT] Corrected protocol for {sn} to HTTP")
+
+
 
 def process_attendance_data(sn: str, raw_data: str):
     """Background task: parse ADMS push data and insert to Oracle."""
+    # MANDATORY CHECK: Machine must be assigned to a company
+    state = pull_manager.get_machine(sn=sn)
+    company = state.get("company_name") if state else "None"
+    
+    if company in ["None", "", None]:
+        logger.warning(f"[PUSH ACCESS DENIED] Data from {sn} ignored - Machine not registered to a company.")
+        return
+
     count = 0
     records = []
     for line in raw_data.splitlines():
@@ -175,8 +295,11 @@ async def receive_cdata(
     SN: Optional[str] = Query(None),
     table: Optional[str] = Query(None)
 ):
+    ip = request.client.host
+    register_push_device(SN, ip)
+
     if request.method == 'GET':
-        log(f"Device {SN} Heartbeat (GET)")
+        log(f"Device {SN} Heartbeat (GET) from {ip}")
         return "OK"
     if table == 'ATTLOG':
         log(f"Received ATTLOG from {SN}")
@@ -190,7 +313,11 @@ async def receive_cdata(
 
 
 @app.get("/iclock/getrequest", response_class=PlainTextResponse)
-async def get_request():
+async def get_request(request: Request, SN: Optional[str] = Query(None)):
+    ip = request.client.host
+    if SN:
+        register_push_device(SN, ip)
+        log(f"Device {SN} getrequest from {ip}")
     return "OK"
 
 
@@ -200,31 +327,101 @@ async def device_cmd():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 2 — Pull endpoints  /pull/*
+# PHASE 1.5 — Auth & Admin endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/auth/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    if form_data.username != ADMIN_USERNAME or not verify_password(form_data.password, ADMIN_PASS_HASH):
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    
+    access_token = create_access_token(data={"sub": form_data.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/admin/server/logs", dependencies=[Depends(get_current_user)])
+async def get_server_logs():
+    return list(log_buffer.logs)
+
+@app.get("/api/admin/server/status", dependencies=[Depends(get_current_user)])
+async def get_server_status():
+    return {
+        "enabled": pull_manager.enabled,
+        "scheduler_running": pull_manager._scheduler.running
+    }
+
+@app.post("/api/admin/server/control", dependencies=[Depends(get_current_user)])
+async def control_server(body: ControlIn):
+    if body.action == "start":
+        pull_manager.enabled = True
+        logger.info("[Admin] Pull Engine ENABLED by user")
+    elif body.action == "stop":
+        pull_manager.enabled = False
+        logger.info("[Admin] Pull Engine DISABLED by user")
+    return {"success": True, "enabled": pull_manager.enabled}
 
 # ── Machine management ────────────────────────────────────────────────────────
 
-@app.get("/pull/machines")
+@app.get("/pull/machines", dependencies=[Depends(get_current_user)])
 async def list_machines():
     """List all machines with their live status."""
     return pull_manager.get_all_status()
 
 
-@app.post("/pull/machines")
+@app.post("/pull/machines", dependencies=[Depends(get_current_user)])
 async def add_machine(machine: MachineIn):
     """Add a new machine (writes to machines.json)."""
     result = pull_manager.add_machine(machine.dict())
     return result
 
 
-@app.delete("/pull/machines/{sn}")
+@app.get("/api/admin/companies", dependencies=[Depends(get_current_user)])
+async def list_companies():
+    """Return a list of unique company names registered in the system."""
+    try:
+        config_db = db.load_latest_config("Oracle")
+        conn = db.connect_db_oracle(config_db)
+        meta = db.get_machine_meta(conn)
+        conn.close()
+        # Extract unique company names
+        companies = sorted(list(set(m.get("company_name", "None") for m in meta.values())))
+        return {"success": True, "companies": companies}
+    except Exception as e:
+        logger.error(f"[Admin] Failed to fetch companies: {e}")
+        return {"success": False, "error": str(e), "companies": ["None"]}
+
+@app.post("/api/admin/companies/map", dependencies=[Depends(get_current_user)])
+async def map_devices_to_company(body: CompanyMapIn):
+    """Bulk link a list of Serial Numbers to a Company Name."""
+    try:
+        config_db = db.load_latest_config("Oracle")
+        conn = db.connect_db_oracle(config_db)
+        
+        for sn in body.sns:
+            # 1. Update Oracle
+            state = pull_manager.get_machine(sn=sn)
+            ip = state.get("ip", "0.0.0.0") if state else "0.0.0.0"
+            
+            # Use current protocol or default to HTTP if SN mapping is happening
+            proto = state.get("protocol", "HTTP")
+            
+            db.upsert_machine_meta(conn, sn, ip, proto, body.company_name)
+            
+            # 2. Update In-Memory Engine
+            pull_manager.update_machine_metadata(sn, proto, body.company_name)
+            
+        conn.close()
+        return {"success": True, "message": f"Mapped {len(body.sns)} devices to {body.company_name}"}
+    except Exception as e:
+        logger.error(f"[Admin] Mapping failed: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.delete("/pull/machines/{sn}", dependencies=[Depends(get_current_user)])
 async def remove_machine(sn: str):
     """Remove a machine by serial number."""
     return pull_manager.remove_machine(sn=sn)
 
 
-@app.post("/pull/machines/test-connection")
+@app.post("/pull/machines/test-connection", dependencies=[Depends(get_current_user)])
 async def test_connection(body: TestConnectionIn):
     """
     Test connectivity to a machine before adding it.
@@ -234,7 +431,7 @@ async def test_connection(body: TestConnectionIn):
     return pull_manager.test_connection(body.ip, body.port, body.password)
 
 
-@app.post("/pull/machines/reload")
+@app.post("/pull/machines/reload", dependencies=[Depends(get_current_user)])
 async def reload_machines():
     """Hot-reload machines.json without server restart."""
     pull_manager.reload()
@@ -243,14 +440,14 @@ async def reload_machines():
 
 # ── Attendance pull ───────────────────────────────────────────────────────────
 
-@app.post("/pull/attendance/{sn}")
+@app.post("/pull/attendance/{sn}", dependencies=[Depends(get_current_user)])
 async def manual_pull(sn: str):
     """Manually trigger a one-shot attendance pull from the given machine."""
     result = pull_manager.pull_once(sn=sn)
     return result
 
 
-@app.get("/pull/attendance/logs")
+@app.get("/pull/attendance/logs", dependencies=[Depends(get_current_user)])
 async def get_attendance_logs(
     date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),
     sn:   Optional[str] = Query(None, description="Filter by machine SN"),
@@ -303,19 +500,19 @@ async def get_attendance_logs(
 
 # ── Device management ─────────────────────────────────────────────────────────
 
-@app.get("/pull/device-info/{sn}")
+@app.get("/pull/device-info/{sn}", dependencies=[Depends(get_current_user)])
 async def device_info(sn: str):
     """Get firmware version, serial number, memory stats from a device."""
     return pull_manager.get_device_info(sn=sn)
 
 
-@app.post("/pull/clear-attendance/{sn}")
+@app.post("/pull/clear-attendance/{sn}", dependencies=[Depends(get_current_user)])
 async def clear_attendance(sn: str):
     """Clear attendance log on the device (password-protected in UI)."""
     return pull_manager.clear_attendance(sn=sn)
 
 
-@app.post("/pull/sync-time/{sn}")
+@app.post("/pull/sync-time/{sn}", dependencies=[Depends(get_current_user)])
 async def sync_time(sn: str):
     """Sync device clock to server time."""
     return pull_manager.sync_time(sn=sn)
@@ -323,7 +520,7 @@ async def sync_time(sn: str):
 
 # ── Dashboard stats ───────────────────────────────────────────────────────────
 
-@app.get("/pull/stats")
+@app.get("/pull/stats", dependencies=[Depends(get_current_user)])
 async def dashboard_stats():
     """
     Aggregate stats for the Dashboard page.
@@ -350,10 +547,21 @@ async def dashboard_stats():
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
 
+    # Get unique companies count
+    comp_count = 0
+    try:
+        config_db = db.load_latest_config("Oracle")
+        conn = db.connect_db_oracle(config_db)
+        meta = db.get_machine_meta(conn)
+        conn.close()
+        comp_count = len(set(m.get("company_name", "None") for m in meta.values()))
+    except: pass
+
     return {
         "total_machines":  len(machines),
         "online_machines": online,
         "records_today":   record_count,
+        "total_companies": comp_count,
         "recent_push_logs": len(RECENT_LOGS),
         "sync_interval_seconds": int(os.getenv("PULL_SYNC_INTERVAL", "20")),
     }

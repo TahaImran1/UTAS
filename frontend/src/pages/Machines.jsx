@@ -10,13 +10,25 @@ export default function Machines() {
   const [testing, setTesting] = useState(false)
   
   // Form State
-  const [formData, setFormData] = useState({ ip: '', port: 4370, location: '', sn: '', password: 0 })
+  const [formData, setFormData] = useState({ ip: '', port: 4370, location: '', sn: '', password: 0, protocol: 'TCP', company_name: 'None' })
+  const [companies, setCompanies] = useState(['None'])
 
   useEffect(() => {
     fetchMachines()
-    const interval = setInterval(fetchMachines, 10000)
+    fetchCompanies()
+    const interval = setInterval(() => {
+        fetchMachines();
+        fetchCompanies();
+    }, 10000)
     return () => clearInterval(interval)
   }, [])
+
+  const fetchCompanies = async () => {
+    try {
+      const res = await getCompanies()
+      if(res.data.success) setCompanies(res.data.companies)
+    } catch (err) {}
+  }
 
   const fetchMachines = async () => {
     try {
@@ -54,7 +66,7 @@ export default function Machines() {
       if(res.data.success) {
         toast.success('Machine Added')
         setShowModal(false)
-        setFormData({ ip: '', port: 4370, location: '', sn: '', password: 0 })
+        setFormData({ ip: '', port: 4370, location: '', sn: '', password: 0, protocol: 'TCP', company_name: 'None' })
         fetchMachines()
       }
     } catch (err) {
@@ -89,8 +101,8 @@ export default function Machines() {
   }
   
   const handleClear = async (sn) => {
-    if(!window.prompt("Enter admin password to clear device logs:") === "1234") {
-      return toast.error("Incorrect password")
+    if(!window.confirm("Are you sure you want to clear ALL logs on this device?")) {
+      return
     }
     const t = toast.loading('Clearing logs...')
     try {
@@ -142,11 +154,17 @@ export default function Machines() {
                 <span className={`status-badge ${m.status}`}>{m.status}</span>
               </div>
               
-              <div className="machine-info-row">
-                <span className="machine-info-label">Protocol</span>
-                <span className="machine-info-value">TCP</span>
-              </div>
                <div className="machine-info-row">
+                <span className="machine-info-label">Protocol</span>
+                <span className="machine-info-value" style={{color: m.protocol === 'HTTP' ? 'var(--color-accent)' : 'inherit', fontWeight: 'bold'}}>
+                    {m.protocol || 'TCP'}
+                </span>
+              </div>
+              <div className="machine-info-row">
+                <span className="machine-info-label">Company</span>
+                <span className="machine-info-value">{m.company_name || 'None'}</span>
+              </div>
+              <div className="machine-info-row">
                 <span className="machine-info-label">IP Address</span>
                 <span className="machine-info-value">{m.ip}:{m.port}</span>
               </div>
@@ -192,7 +210,24 @@ export default function Machines() {
                </div>
                <div style={{flex: 1}}>
                   <label>Password</label>
-                  <input type="number" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
+                  <input type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} placeholder="0 if none" />
+               </div>
+            </div>
+
+            <div className="form-group" style={{display: 'flex', gap: '10px'}}>
+               <div style={{flex: 1}}>
+                  <label>Protocol</label>
+                  <select className="form-control" value={formData.protocol} onChange={e => setFormData({...formData, protocol: e.target.value})}>
+                      <option value="TCP">TCP (Pull)</option>
+                      <option value="HTTP">HTTP (Push/ADMS)</option>
+                  </select>
+               </div>
+               <div style={{flex: 1}}>
+                  <label>Company Mapping</label>
+                  <input type="text" list="company-list" value={formData.company_name} onChange={e => setFormData({...formData, company_name: e.target.value})} placeholder="e.g. Techno Group" />
+                  <datalist id="company-list">
+                      {companies.map(c => <option key={c} value={c} />)}
+                  </datalist>
                </div>
             </div>
 

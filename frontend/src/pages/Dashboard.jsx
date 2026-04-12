@@ -29,7 +29,7 @@ export default function Dashboard() {
     <div>
       <div className="stat-cards-row">
         <StatCard title="Total Employees" value="24" color="green" icon={MdPeople} />
-        <StatCard title="Total Companies" value="3" color="blue" icon={MdBusiness} />
+        <StatCard title="Total Companies" value={stats.total_companies || 0} color="blue" icon={MdBusiness} />
         <StatCard title="Total Machines" value={stats.total_machines || 7} color="red" icon={MdFingerprint} />
         <StatCard title="Present Emps" value={stats.records_today || 18} color="purple" icon={MdCheckCircle} />
       </div>

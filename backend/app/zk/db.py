@@ -97,22 +97,9 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
     rows_inserted = 0
     try:
         cursor = connection.cursor()
-        
-        # --- HARDCODED MACHINE-TO-COMPANY MAPPING (Story 1 & 3) ---
-        # Edit this dictionary to add more machines or companies
-        SN_TO_CLIENT = {
-            "NYU7253100205": 1,  # Company A
-            "TEST_MACHINE_002": 2 # Company B
-        }
-        
-        # Assign Client ID based on Serial Number
-        client_id = SN_TO_CLIENT.get(machine_info, 0) # Default to 0 if not mapped
-        
-        if client_id == 0:
-            print(f"[*] Note: Machine {machine_info} not in mapping. Assigning Client ID 0 (General).")
-        else:
-            print(f"[*] Machine {machine_info} mapped to Client ID {client_id}")
-        # --------------------------------------------------------
+        # Skip hardcoded mapping for now as requested. 
+        # Future: Can use a DB lookup or an external config file.
+        client_id = 0 
 
         table = config['table']
         col_pk = config['col_pk']
@@ -160,3 +147,64 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         raise Exception(error_msg)
     print('Data Inserted Successfully')
     print(f"Number of entries inserted: {rows_inserted}")
+
+
+# ─── New Mapping table functions (Iteration 2) ──────────────────────────────
+
+def get_machine_meta(connection):
+    """Retrieve all machine-to-company mappings from Oracle."""
+    mappings = {}
+    try:
+        cursor = connection.cursor()
+        cursor.execute("SELECT SN, IP, PROTOCOL, COMPANY_NAME FROM COMP_MACHINE")
+        for sn, ip, protocol, company in cursor.fetchall():
+            mappings[sn] = {
+                "sn": sn,
+                "ip": ip,
+                "protocol": protocol,
+                "company_name": company
+            }
+        cursor.close()
+    except Exception as e:
+        # Table might not exist yet, log and return empty
+        logging.warning(f"Error fetching machine meta: {e}")
+    return mappings
+
+def upsert_machine_meta(connection, sn, ip, protocol, company_name):
+    """Save or update a machine's mapping in Oracle."""
+    try:
+        cursor = connection.cursor()
+        query = """
+        MERGE INTO COMP_MACHINE target
+        USING (SELECT :sn AS sn, :ip AS ip, :protocol AS protocol, :company_name AS company_name FROM dual) src
+        ON (target.SN = src.sn)
+        WHEN MATCHED THEN
+          UPDATE SET target.IP = src.ip, target.PROTOCOL = src.protocol, target.COMPANY_NAME = src.company_name
+        WHEN NOT MATCHED THEN
+          INSERT (SN, IP, PROTOCOL, COMPANY_NAME)
+          VALUES (src.sn, src.ip, src.protocol, src.company_name)
+        """
+        cursor.execute(query, {
+            "sn": sn,
+            "ip": ip,
+            "protocol": protocol,
+            "company_name": company_name
+        })
+        connection.commit()
+        cursor.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error upserting machine meta: {e}")
+        return False
+
+def delete_machine_meta(connection, sn):
+    """Remove a mapping from Oracle."""
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM COMP_MACHINE WHERE SN = :sn", {"sn": sn})
+        connection.commit()
+        cursor.close()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting machine meta: {e}")
+        return False

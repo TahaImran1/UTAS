@@ -39,24 +39,38 @@ class MachineState:
         self.port     = int(config.get("port", 4370))
         self.location = config.get("location", "")
         self.password = int(config.get("password", 0))
+        self.protocol = config.get("protocol", "TCP") # TCP or HTTP
+        self.company_name = config.get("company_name", "None")
 
         self.conn: Optional[ZK]  = None
         self.status: str         = "offline"   # online | offline | syncing
         self.last_sync: Optional[datetime] = None
         self.last_record_count: int = 0
         self.last_error: str     = ""
+        self.last_seen: Optional[datetime] = None # For Push heartbeats
         self.lock = threading.Lock()
 
     def to_dict(self) -> dict:
+        # For HTTP (Push) devices, status is based on recent pulse
+        status = self.status
+        if self.protocol == "HTTP" and self.last_seen:
+            delta = (datetime.now() - self.last_seen).total_seconds()
+            if delta < 120: # 2 minutes
+                status = "online"
+            else:
+                status = "offline"
+
         return {
             "sn":               self.sn,
             "ip":               self.ip,
             "port":             self.port,
             "location":         self.location,
-            "status":           self.status,
+            "status":           status,
             "last_sync":        self.last_sync.isoformat() if self.last_sync else None,
             "last_record_count":self.last_record_count,
             "last_error":       self.last_error,
+            "protocol":         self.protocol,
+            "company_name":     self.company_name
         }
 
 
@@ -70,12 +84,15 @@ class ZKPullManager:
         self._machines: Dict[str, MachineState] = {}   # key = ip:port or sn
         self._scheduler = BackgroundScheduler(daemon=True)
         self._sync_lock = threading.Lock()
+        self.enabled = True # Administrative toggle for the engine
 
     # ─── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self):
         """Called on FastAPI startup. Loads machines and starts scheduler."""
         self._reload_machines()
+        # Sync Company/Protocol mappings from Oracle
+        self.sync_metadata_from_oracle()
         if AUTO_START:
             self._scheduler.add_job(
                 self._sync_all_tick,
@@ -165,6 +182,10 @@ class ZKPullManager:
 
     def _sync_all_tick(self):
         """APScheduler job: called every SYNC_INTERVAL seconds."""
+        if not self.enabled:
+            logger.info("[PullEngine] Sync tick skipped (engine is DISABLED)")
+            return
+
         logger.info(f"[PullEngine] Sync tick @ {datetime.now().strftime('%H:%M:%S')}")
         self._reload_machines()   # pick up any newly added machines
         for key, state in list(self._machines.items()):
@@ -177,6 +198,11 @@ class ZKPullManager:
 
     def _pull_machine(self, state: MachineState):
         """Pull attendance from one machine and insert to Oracle."""
+        # MANDATORY CHECK: Machine must be assigned to a company
+        if state.company_name in ["None", "", None]:
+            logger.debug(f"[PullEngine] {state.ip} skipped - Not mapped to a company.")
+            return
+
         with state.lock:
             if state.status == "syncing":
                 logger.debug(f"[PullEngine] {state.ip} already syncing, skipping")
@@ -340,7 +366,25 @@ class ZKPullManager:
 
     def add_machine(self, machine: dict) -> dict:
         """Add a new machine to machines.json and register it in the engine."""
+        # 1. Save technical config to JSON
         machines_config.save_machine(machine)
+        
+        # 2. Save metadata (Company/Protocol) to Oracle
+        try:
+            from .zk import db
+            config_db = db.load_latest_config("Oracle")
+            conn = db.connect_db_oracle(config_db)
+            db.upsert_machine_meta(
+                conn, 
+                machine.get("sn", ""), 
+                machine.get("ip", ""),
+                machine.get("protocol", "TCP"),
+                machine.get("company_name", "None")
+            )
+            conn.close()
+        except Exception as e:
+            logger.error(f"[PullEngine] Failed to save metadata to Oracle: {e}")
+
         key = machine.get("sn") or f"{machine['ip']}:{machine.get('port', 4370)}"
         self._machines[key] = MachineState(machine)
         return {"success": True, "machine": machine}
@@ -358,6 +402,41 @@ class ZKPullManager:
     def get_all_status(self) -> list:
         """Return status of all registered machines (for dashboard and machines page)."""
         return [state.to_dict() for state in self._machines.values()]
+
+    def sync_metadata_from_oracle(self):
+        """Fetch SN mappings from Oracle and inject into in-memory states."""
+        try:
+            from .zk import db
+            config_db = db.load_latest_config("Oracle")
+            conn = db.connect_db_oracle(config_db)
+            meta = db.get_machine_meta(conn)
+            conn.close()
+
+            for sn, data in meta.items():
+                if sn in self._machines:
+                    self._machines[sn].protocol = data.get("protocol", "TCP")
+                    self._machines[sn].company_name = data.get("company_name", "None")
+                    logger.info(f"[PullEngine] Synced metadata for {sn} (Company: {data.get('company_name')})")
+        except Exception as e:
+            logger.warning(f"[PullEngine] Skipping metadata sync: {e}")
+
+    def update_machine_metadata(self, sn: str, protocol: str, company: str):
+        """Update the in-memory state of a machine after a mapping change."""
+        if sn in self._machines:
+            self._machines[sn].protocol = protocol
+            self._machines[sn].company_name = company
+            logger.info(f"[PullEngine] Updated metadata for {sn}: Protocol={protocol}, Company={company}")
+
+    def update_pulse(self, sn: str):
+        """Register a heartbeat pulse for a push device."""
+        if sn in self._machines:
+            self._machines[sn].last_seen = datetime.now()
+            # If it was marked offline (due to old pulse), it will become online in to_dict
+
+    def get_machine(self, sn: str = "", ip: str = "", port: int = 4370) -> dict | None:
+        """Query a registered machine's current status and config."""
+        state = self._find_state(sn, ip, port)
+        return state.to_dict() if state else None
 
     # ─── Utilities ───────────────────────────────────────────────────────────────
 
