@@ -2,7 +2,7 @@ import React from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { MdDashboard, MdFingerprint, MdBusiness, MdPeople, MdBarChart, MdSettingsInputComponent, MdLogout } from 'react-icons/md'
 
-export default function Sidebar() {
+export default function Sidebar({ onLogout }) {
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -17,7 +17,11 @@ export default function Sidebar() {
 
   const handleLogout = () => {
     localStorage.removeItem('utas_token')
-    navigate('/login')
+    if (onLogout) {
+      onLogout()
+    } else {
+      navigate('/login')
+    }
   }
 
   return (

@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react'
-import { MdSearch, MdFingerprint, MdDelete, MdRefresh, MdClearAll, MdInfo } from 'react-icons/md'
+import { MdSearch, MdFingerprint, MdDelete, MdRefresh, MdClearAll, MdInfo, MdAccessTime, MdClose } from 'react-icons/md'
 import toast from 'react-hot-toast'
-import { getMachines, addMachine, removeMachine, testConnection, manualPull, getDeviceInfo, clearAttendance } from '../api/client'
+import { getMachines, addMachine, removeMachine, testConnection, manualPull, getDeviceInfo, clearAttendance, getCompanies, syncTime } from '../api/client'
 
 export default function Machines() {
   const [machines, setMachines] = useState([])
   const [loading, setLoading] = useState(true)
   const [showModal, setShowModal] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [infoModal, setInfoModal] = useState(null)
   
   // Form State
   const [formData, setFormData] = useState({ ip: '', port: 4370, location: '', sn: '', password: 0, protocol: 'TCP', company_name: 'None' })
@@ -60,11 +61,39 @@ export default function Machines() {
   }
 
   const handleSaveMachine = async () => {
-    if(!formData.ip) return toast.error('Enter IP Address')
+    if (formData.protocol === 'TCP' && !formData.ip) return toast.error('Enter IP Address')
+    if (formData.protocol === 'HTTP' && !formData.sn) return toast.error('Enter Serial Number')
+
+    let payload = { ...formData, company_name: 'None', location: '' }
+    
+    if (formData.protocol === 'TCP') {
+      const t = toast.loading('Testing TCP connection to device...')
+      setTesting(true)
+      try {
+        const res = await testConnection({ ip: formData.ip, port: formData.port, password: 0 })
+        if (res.data.success) {
+          toast.success('Connection Successful!', { id: t })
+          payload.sn = res.data.serial_number
+          payload.password = 0
+        } else {
+          toast.error(`Connection Failed: ${res.data.error}`, { id: t })
+          setTesting(false)
+          return
+        }
+      } catch (err) {
+        toast.error('Connection Failed - Server unreachable', { id: t })
+        setTesting(false)
+        return
+      }
+      setTesting(false)
+    } else {
+      payload = { ...formData }
+    }
+
     try {
-      const res = await addMachine(formData)
+      const res = await addMachine(payload)
       if(res.data.success) {
-        toast.success('Machine Added')
+        toast.success('Machine Added Successfully')
         setShowModal(false)
         setFormData({ ip: '', port: 4370, location: '', sn: '', password: 0, protocol: 'TCP', company_name: 'None' })
         fetchMachines()
@@ -108,9 +137,38 @@ export default function Machines() {
     try {
       const res = await clearAttendance(sn)
       if(res.data.success) {
-        toast.success('Logs cleared on device', { id: t })
+        toast.success(res.data.message || 'Logs cleared on device', { id: t })
       } else {
         toast.error(res.data.error || 'Clear failed', { id: t })
+      }
+    } catch (err) {
+      toast.error('Server error', { id: t })
+    }
+  }
+
+  const handleSyncTime = async (sn) => {
+    const t = toast.loading('Syncing device time...')
+    try {
+      const res = await syncTime(sn)
+      if(res.data.success) {
+        toast.success(`Time synced successfully`, { id: t })
+      } else {
+        toast.error(res.data.error || 'Sync failed', { id: t })
+      }
+    } catch (err) {
+      toast.error('Server error', { id: t })
+    }
+  }
+
+  const handleDeviceInfo = async (sn) => {
+    const t = toast.loading('Fetching device info...')
+    try {
+      const res = await getDeviceInfo(sn)
+      if(!res.data.error) {
+        toast.dismiss(t)
+        setInfoModal(res.data)
+      } else {
+        toast.error(res.data.error || 'Failed to get info', { id: t })
       }
     } catch (err) {
       toast.error('Server error', { id: t })
@@ -176,15 +234,21 @@ export default function Machines() {
                 {m.last_sync ? `Last sync: ${new Date(m.last_sync).toLocaleTimeString()}` : 'Never synced'}
               </div>
 
-              <div className="machine-card-actions">
-                <button className="btn btn-ghost btn-sm" style={{flex: 1}} title="Manual Pull" onClick={() => handlePull(m.sn)}>
+            <div className="machine-card-actions" style={{display: 'flex', flexWrap: 'wrap', gap: '5px'}}>
+                <button className="btn btn-ghost btn-sm" style={{flex: '1 1 30%'}} title="Manual Pull" onClick={() => handlePull(m.sn)}>
                   <MdRefresh /> Pull
                 </button>
-                <button className="btn btn-ghost btn-sm" style={{flex: 1, borderColor: 'var(--card-red)', color: 'var(--card-red)'}} title="Clear Logs" onClick={() => handleClear(m.sn)}>
+                <button className="btn btn-ghost btn-sm" style={{flex: '1 1 30%'}} title="Sync Time" onClick={() => handleSyncTime(m.sn)}>
+                  Sync Time
+                </button>
+                <button className="btn btn-ghost btn-sm" style={{flex: '1 1 30%'}} title="Device Info" onClick={() => handleDeviceInfo(m.sn)}>
+                  Info
+                </button>
+                <button className="btn btn-ghost btn-sm" style={{flex: '1 1 45%', borderColor: 'var(--card-red)', color: 'var(--card-red)'}} title="Clear Logs" onClick={() => handleClear(m.sn)}>
                   <MdClearAll /> Clear
                 </button>
-                <button className="btn btn-ghost btn-sm" onClick={() => handleDelete(m.sn)} title="Delete Machine">
-                  <MdDelete />
+                <button className="btn btn-ghost btn-sm" style={{flex: '1 1 45%'}} onClick={() => handleDelete(m.sn)} title="Delete Machine">
+                  <MdDelete /> Delete
                 </button>
               </div>
             </div>
@@ -199,56 +263,78 @@ export default function Machines() {
             <h2>Add New Machine</h2>
             
             <div className="form-group">
-              <label>IP Address</label>
-              <input type="text" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} placeholder="e.g. 192.168.1.100" />
-            </div>
-            
-             <div className="form-group" style={{display: 'flex', gap: '10px'}}>
-               <div style={{flex: 1}}>
-                  <label>Port</label>
-                  <input type="number" value={formData.port} onChange={e => setFormData({...formData, port: e.target.value})} />
-               </div>
-               <div style={{flex: 1}}>
-                  <label>Password</label>
-                  <input type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} placeholder="0 if none" />
-               </div>
+              <label>Protocol</label>
+              <select className="form-control" value={formData.protocol} onChange={e => setFormData({...formData, protocol: e.target.value})}>
+                  <option value="TCP">TCP (Pull) - Auto Detect</option>
+                  <option value="HTTP">HTTP (Push/ADMS) - Manual Entry</option>
+              </select>
             </div>
 
-            <div className="form-group" style={{display: 'flex', gap: '10px'}}>
-               <div style={{flex: 1}}>
-                  <label>Protocol</label>
-                  <select className="form-control" value={formData.protocol} onChange={e => setFormData({...formData, protocol: e.target.value})}>
-                      <option value="TCP">TCP (Pull)</option>
-                      <option value="HTTP">HTTP (Push/ADMS)</option>
-                  </select>
-               </div>
-               <div style={{flex: 1}}>
-                  <label>Company Mapping</label>
-                  <input type="text" list="company-list" value={formData.company_name} onChange={e => setFormData({...formData, company_name: e.target.value})} placeholder="e.g. Techno Group" />
-                  <datalist id="company-list">
-                      {companies.map(c => <option key={c} value={c} />)}
-                  </datalist>
-               </div>
-            </div>
-
-            <div className="form-group">
-              <label>Location / Branch</label>
-              <input type="text" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} placeholder="e.g. Head Office" />
-            </div>
-            
-            <div className="form-group">
-              <label>Serial Number</label>
-              <div style={{display: 'flex', gap: '10px'}}>
-                <input type="text" value={formData.sn} onChange={e => setFormData({...formData, sn: e.target.value})} placeholder="Auto-filled on test" disabled={testing} />
-                <button type="button" className="btn btn-ghost" onClick={handleTestConnection} disabled={testing || !formData.ip}>
-                  {testing ? 'Testing...' : 'Test'}
-                </button>
+            {formData.protocol === 'TCP' ? (
+              <div className="form-group" style={{display: 'flex', gap: '10px'}}>
+                 <div style={{flex: 2}}>
+                    <label>IP Address</label>
+                    <input type="text" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} placeholder="e.g. 192.168.1.100" />
+                 </div>
+                 <div style={{flex: 1}}>
+                    <label>Port</label>
+                    <input type="number" value={formData.port} onChange={e => setFormData({...formData, port: e.target.value})} />
+                 </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="form-group">
+                  <label>Serial Number</label>
+                  <input type="text" value={formData.sn} onChange={e => setFormData({...formData, sn: e.target.value})} placeholder="e.g. NYU12345" />
+                </div>
+                
+                <div className="form-group" style={{display: 'flex', gap: '10px'}}>
+                   <div style={{flex: 1}}>
+                      <label>IP Address (Optional)</label>
+                      <input type="text" value={formData.ip} onChange={e => setFormData({...formData, ip: e.target.value})} placeholder="0.0.0.0" />
+                   </div>
+                   <div style={{flex: 1}}>
+                      <label>Company Mapping</label>
+                      <input type="text" list="company-list" value={formData.company_name} onChange={e => setFormData({...formData, company_name: e.target.value})} placeholder="e.g. Techno Group" />
+                      <datalist id="company-list">
+                          {companies.map(c => <option key={c} value={c} />)}
+                      </datalist>
+                   </div>
+                </div>
+
+                <div className="form-group">
+                  <label>Location / Branch (Optional)</label>
+                  <input type="text" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} placeholder="e.g. Head Office" />
+                </div>
+              </>
+            )}
 
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancel</button>
               <button className="btn btn-primary" onClick={handleSaveMachine}>Save Machine</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Info Modal */}
+      {infoModal && (
+        <div className="modal-overlay">
+          <div className="modal" style={{maxWidth: '450px'}}>
+            <h2>Device Information</h2>
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px', margin: '20px 0'}}>
+              <div><strong>Serial No:</strong> {infoModal.serial_number}</div>
+              <div><strong>Device Time:</strong> {infoModal.device_time}</div>
+              <div><strong>IP Address:</strong> {infoModal.ip}</div>
+              <div><strong>Firmware:</strong> {infoModal.firmware}</div>
+              <div><strong>Platform:</strong> {infoModal.platform}</div>
+              <div><strong>MAC Address:</strong> {infoModal.mac}</div>
+              <div><strong>Total Logs:</strong> {infoModal.records}</div>
+              <div><strong>Total Users:</strong> {infoModal.users}</div>
+              <div><strong>Total Fingers:</strong> {infoModal.fingers}</div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={() => setInfoModal(null)}>Close</button>
             </div>
           </div>
         </div>

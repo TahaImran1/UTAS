@@ -236,8 +236,12 @@ class ZKPullManager:
                     # Auto-delete from device if configured
                     if AUTO_DELETE:
                         try:
-                            state.conn.clear_attendance()
-                            logger.info(f"[PullEngine] {state.ip} — attendance cleared from device")
+                            state.conn.disable_device()
+                            try:
+                                state.conn.clear_attendance()
+                                logger.info(f"[PullEngine] {state.ip} — attendance cleared from device")
+                            finally:
+                                state.conn.enable_device()
                         except Exception as e:
                             logger.error(f"[PullEngine] {state.ip} — clear failed: {e}")
 
@@ -254,7 +258,7 @@ class ZKPullManager:
     def _insert_to_oracle(self, records, machine_ref: str):
         """Reuse the existing zk/db.py Oracle insert function."""
         try:
-            from .zk import db
+            from zk import db
             config = db.load_latest_config("Oracle")
             conn = db.connect_db_oracle(config)
             db.insert_log_oracle(conn, records, machine_ref, config)
@@ -290,27 +294,32 @@ class ZKPullManager:
         if not state:
             return {"error": "Machine not found"}
         try:
-            if not state.conn or not state.conn.is_connect:
-                if not self._connect(state):
-                    return {"error": state.last_error}
+            with state.lock:
+                if not state.conn or not state.conn.is_connect:
+                    if not self._connect(state):
+                        return {"error": state.last_error}
 
-            conn = state.conn
-            conn.read_sizes()
-            return {
-                "ip":              state.ip,
-                "port":            state.port,
-                "location":        state.location,
-                "firmware":        self._safe_call(conn.get_firmware_version),
-                "serial_number":   self._safe_call(conn.get_serialnumber),
-                "platform":        self._safe_call(conn.get_platform),
-                "mac":             self._safe_call(conn.get_mac),
-                "device_name":     self._safe_call(conn.get_device_name),
-                "users":           conn.users,
-                "records":         conn.records,
-                "fingers":         conn.fingers,
-                "users_cap":       conn.users_cap,
-                "rec_cap":         conn.rec_cap,
-            }
+                conn = state.conn
+                conn.read_sizes()
+                time_obj = self._safe_call(conn.get_time)
+                device_time_str = str(time_obj) if time_obj else "Unknown"
+                
+                return {
+                    "ip":              state.ip,
+                    "port":            state.port,
+                    "location":        state.location,
+                    "firmware":        self._safe_call(conn.get_firmware_version),
+                    "serial_number":   self._safe_call(conn.get_serialnumber),
+                    "platform":        self._safe_call(conn.get_platform),
+                    "mac":             self._safe_call(conn.get_mac),
+                    "device_name":     self._safe_call(conn.get_device_name),
+                    "device_time":     device_time_str,
+                    "users":           conn.users,
+                    "records":         conn.records,
+                    "fingers":         conn.fingers,
+                    "users_cap":       conn.users_cap,
+                    "rec_cap":         conn.rec_cap,
+                }
         except Exception as e:
             return {"error": str(e)}
 
@@ -320,10 +329,15 @@ class ZKPullManager:
         if not state:
             return {"success": False, "error": "Machine not found"}
         try:
-            if not state.conn or not state.conn.is_connect:
-                if not self._connect(state):
-                    return {"success": False, "error": state.last_error}
-            state.conn.clear_attendance()
+            with state.lock:
+                if not state.conn or not state.conn.is_connect:
+                    if not self._connect(state):
+                        return {"success": False, "error": state.last_error}
+                state.conn.disable_device()
+                try:
+                    state.conn.clear_attendance()
+                finally:
+                    state.conn.enable_device()
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -334,10 +348,15 @@ class ZKPullManager:
         if not state:
             return {"success": False, "error": "Machine not found"}
         try:
-            if not state.conn or not state.conn.is_connect:
-                if not self._connect(state):
-                    return {"success": False, "error": state.last_error}
-            state.conn.set_time(datetime.now())
+            with state.lock:
+                if not state.conn or not state.conn.is_connect:
+                    if not self._connect(state):
+                        return {"success": False, "error": state.last_error}
+                state.conn.disable_device()
+                try:
+                    state.conn.set_time(datetime.now())
+                finally:
+                    state.conn.enable_device()
             return {"success": True, "synced_to": datetime.now().isoformat()}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -371,7 +390,7 @@ class ZKPullManager:
         
         # 2. Save metadata (Company/Protocol) to Oracle
         try:
-            from .zk import db
+            from zk import db
             config_db = db.load_latest_config("Oracle")
             conn = db.connect_db_oracle(config_db)
             db.upsert_machine_meta(
@@ -406,7 +425,7 @@ class ZKPullManager:
     def sync_metadata_from_oracle(self):
         """Fetch SN mappings from Oracle and inject into in-memory states."""
         try:
-            from .zk import db
+            from zk import db
             config_db = db.load_latest_config("Oracle")
             conn = db.connect_db_oracle(config_db)
             meta = db.get_machine_meta(conn)

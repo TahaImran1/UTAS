@@ -122,6 +122,9 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", 4370))
 # ── In-memory push log (Phase 1 viewer) ────────────────────────────────────
 RECENT_LOGS = []
 
+# Queue for ADMS device commands (Push)
+COMMAND_QUEUE = {}
+
 
 # ── Auth Utilities ───────────────────────────────────────────────────────────
 def verify_password(plain_password, hashed_password):
@@ -195,6 +198,18 @@ def register_push_device(sn: str, ip: str):
     existing = pull_manager.get_machine(sn=sn)
     if not existing:
         logger.info(f"[AUTODETECT] New Push device found: SN={sn} from IP={ip}")
+        company_val = "None"
+        if db:
+            try:
+                config_db = db.load_latest_config("Oracle")
+                conn = db.connect_db_oracle(config_db)
+                meta = db.get_machine_meta(conn)
+                conn.close()
+                if sn in meta:
+                    company_val = meta[sn].get("company_name", "None")
+            except Exception as e:
+                logger.error(f"[AUTODETECT] Failed to fetch company metadata: {e}")
+
         try:
             m = MachineIn(
                 ip=ip,
@@ -203,9 +218,10 @@ def register_push_device(sn: str, ip: str):
                 port=4370,
                 password=0,
                 protocol="HTTP",
-                company_name="None"
+                company_name=company_val
             )
-            pull_manager.add_machine(m.model_dump())
+            # dict() instead of model_dump() for backwards compatibility, or just use what works
+            pull_manager.add_machine(m.dict() if hasattr(m, "dict") else m.model_dump())
         except Exception as e:
             logger.error(f"[AUTODETECT] Failed to register {sn}: {e}")
     else:
@@ -318,11 +334,17 @@ async def get_request(request: Request, SN: Optional[str] = Query(None)):
     if SN:
         register_push_device(SN, ip)
         log(f"Device {SN} getrequest from {ip}")
+        if SN in COMMAND_QUEUE and COMMAND_QUEUE[SN]:
+            cmd = COMMAND_QUEUE[SN].pop(0)
+            log(f"Sending queued command to {SN}: {cmd}")
+            return cmd
     return "OK"
 
 
 @app.post("/iclock/devicecmd", response_class=PlainTextResponse)
-async def device_cmd():
+async def device_cmd(request: Request, SN: Optional[str] = Query(None)):
+    body = await request.body()
+    log(f"Device {SN} cmd result: {body.decode(errors='ignore').strip()}")
     return "OK"
 
 
@@ -422,7 +444,7 @@ async def remove_machine(sn: str):
 
 
 @app.post("/pull/machines/test-connection", dependencies=[Depends(get_current_user)])
-async def test_connection(body: TestConnectionIn):
+def test_connection(body: TestConnectionIn):
     """
     Test connectivity to a machine before adding it.
     Returns firmware, SN, device name on success.
@@ -441,7 +463,7 @@ async def reload_machines():
 # ── Attendance pull ───────────────────────────────────────────────────────────
 
 @app.post("/pull/attendance/{sn}", dependencies=[Depends(get_current_user)])
-async def manual_pull(sn: str):
+def manual_pull(sn: str):
     """Manually trigger a one-shot attendance pull from the given machine."""
     result = pull_manager.pull_once(sn=sn)
     return result
@@ -501,19 +523,26 @@ async def get_attendance_logs(
 # ── Device management ─────────────────────────────────────────────────────────
 
 @app.get("/pull/device-info/{sn}", dependencies=[Depends(get_current_user)])
-async def device_info(sn: str):
+def device_info(sn: str):
     """Get firmware version, serial number, memory stats from a device."""
     return pull_manager.get_device_info(sn=sn)
 
 
 @app.post("/pull/clear-attendance/{sn}", dependencies=[Depends(get_current_user)])
-async def clear_attendance(sn: str):
+def clear_attendance(sn: str):
     """Clear attendance log on the device (password-protected in UI)."""
+    state = pull_manager.get_machine(sn=sn)
+    if state and state.get("protocol") == "HTTP":
+        if sn not in COMMAND_QUEUE:
+            COMMAND_QUEUE[sn] = []
+        COMMAND_QUEUE[sn].append("C:1:CLEAR LOG")
+        return {"success": True, "message": "Command queued for Push device. Logs will clear shortly."}
+        
     return pull_manager.clear_attendance(sn=sn)
 
 
 @app.post("/pull/sync-time/{sn}", dependencies=[Depends(get_current_user)])
-async def sync_time(sn: str):
+def sync_time(sn: str):
     """Sync device clock to server time."""
     return pull_manager.sync_time(sn=sn)
 

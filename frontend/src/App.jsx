@@ -33,7 +33,7 @@ export default function App() {
   return (
     <HashRouter>
       <div className="app-layout">
-        <Sidebar />
+        <Sidebar onLogout={() => setIsAuthenticated(false)} />
         <div className="main-area">
           <TopBar />
           <div className="page-content">

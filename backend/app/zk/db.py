@@ -125,12 +125,19 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         """
         
         # Prepare data for bulk insert
+        import datetime
         batch_data = []
         for attendance in attendance_records:
+            ts = attendance.timestamp
+            if isinstance(ts, datetime.datetime):
+                ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                ts_str = str(ts)
+                
             batch_data.append({
-                "emp_no": attendance.user_id, 
-                "swp_time": attendance.timestamp, 
-                "mach_ref": machine_info
+                "emp_no": str(attendance.user_id), 
+                "swp_time": ts_str, 
+                "mach_ref": str(machine_info)
             })
         
         print(f"Executing bulk insert for {len(batch_data)} records from Device {machine_info}...")
