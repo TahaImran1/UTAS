@@ -1,6 +1,6 @@
 import React from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { MdDashboard, MdFingerprint, MdBusiness, MdPeople, MdBarChart, MdSettingsInputComponent, MdLogout } from 'react-icons/md'
+import { MdDashboard, MdFingerprint, MdBusiness, MdPeople, MdBarChart, MdSettingsInputComponent, MdLogout, MdAnalytics, MdStorage } from 'react-icons/md'
 
 export default function Sidebar({ onLogout }) {
   const location = useLocation()
@@ -13,6 +13,8 @@ export default function Sidebar({ onLogout }) {
     { path: '/companies',icon: <MdBusiness />,     label: 'Companies' },
     { path: '/employees',icon: <MdPeople />,       label: 'Employees' },
     { path: '/logs',     icon: <MdBarChart />,     label: 'Attendance Logs' },
+    { path: '/health',   icon: <MdAnalytics />,    label: 'Health Monitor' },
+    { path: '/database', icon: <MdStorage />,      label: 'Database Config' },
   ]
 
   const handleLogout = () => {

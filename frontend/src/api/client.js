@@ -26,9 +26,18 @@ export const login = (username, password) => {
     })
 }
 
+export const register = (username, password) => client.post('/api/auth/register', { username, password })
+
 // ── Admin / Server ───────────────────────────────────────────────────────────
 export const getServerStatus = ()     => client.get('/api/admin/server/status')
 export const getServerLogs   = ()     => client.get('/api/admin/server/logs')
+export const getHealthStatus = ()     => client.get('/api/admin/health')
+export const getDbConfig = (type) => client.get(`/api/admin/database/config?db_type=${type}`)
+export const saveDbConfig = (config) => client.post('/api/admin/database/config', config)
+export const testDbConnection = (config) => client.post('/api/admin/database/test', config)
+export const connectAndCheck = (payload) => client.post('/api/admin/database/connect-check', payload)
+export const createAttendanceTable = (payload) => client.post('/api/admin/database/create-attendance-table', payload)
+export const createMachineTable = (payload) => client.post('/api/admin/database/create-machine-table', payload)
 export const controlServer       = (act)  => client.post('/api/admin/server/control', { action: act })
 export const getCompanies        = ()     => client.get('/api/admin/companies')
 export const mapDevicesToCompany = (data) => client.post('/api/admin/companies/map', data)

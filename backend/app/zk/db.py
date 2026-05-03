@@ -16,8 +16,259 @@ logging.basicConfig(
     format   = '%(asctime)s:%(levelname)s:%(message)s'
 )
 
+def get_active_db_type():
+    """Returns the currently active database type (Oracle or PostgreSQL)."""
+    return os.getenv("ACTIVE_DB_TYPE", "Oracle")
+
+# ─── New: Wizard helpers ─────────────────────────────────────────────────────
+
+def connect_one_shot(config):
+    """
+    Create a single, non-pooled connection from raw credentials.
+    Used during the initial wizard check — no pool caching side effects.
+    """
+    db_type = config.get("database", "Oracle")
+    if db_type == "Oracle":
+        dsn = oracledb.makedsn(config["host"], config["port"], service_name=config["dbname"])
+        conn = oracledb.connect(user=config["username"], password=config["password"], dsn=dsn)
+        return conn
+    elif db_type == "PostgreSQL":
+        import psycopg2
+        conn = psycopg2.connect(
+            host=config["host"], port=config["port"],
+            user=config["username"], password=config["password"],
+            dbname=config["dbname"]
+        )
+        return conn
+    raise ValueError(f"Unsupported db type: {db_type}")
+
+
+def check_tables_exist(connection, db_type, att_table, machine_table):
+    """
+    Returns a dict { att_table_exists: bool, machine_table_exists: bool }.
+    Does NOT create anything — pure read.
+    """
+    result = {"att_table_exists": False, "machine_table_exists": False}
+    try:
+        cursor = connection.cursor()
+        if db_type == "Oracle":
+            cursor.execute(
+                "SELECT count(*) FROM user_tables WHERE table_name = :tn",
+                {"tn": att_table.upper()}
+            )
+            result["att_table_exists"] = cursor.fetchone()[0] > 0
+
+            cursor.execute(
+                "SELECT count(*) FROM user_tables WHERE table_name = :tn",
+                {"tn": machine_table.upper()}
+            )
+            result["machine_table_exists"] = cursor.fetchone()[0] > 0
+        elif db_type == "PostgreSQL":
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=%s",
+                (att_table.lower(),)
+            )
+            result["att_table_exists"] = cursor.fetchone() is not None
+
+            cursor.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=%s",
+                (machine_table.lower(),)
+            )
+            result["machine_table_exists"] = cursor.fetchone() is not None
+        cursor.close()
+    except Exception as e:
+        logging.error(f"check_tables_exist error: {e}")
+    return result
+
+
+def get_table_columns(connection, db_type, table_name):
+    """Fetch column names for a given table from DB metadata."""
+    columns = []
+    try:
+        cursor = connection.cursor()
+        if db_type == "Oracle":
+            cursor.execute(
+                "SELECT column_name FROM user_tab_columns WHERE table_name = :tn ORDER BY column_id",
+                {"tn": table_name.upper()}
+            )
+        else:
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position",
+                (table_name.lower(),)
+            )
+        columns = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+    except Exception as e:
+        logging.error(f"Error fetching columns for {table_name}: {e}")
+    return columns
+
+
+def create_attendance_table(connection, db_type, config):
+    """
+    Create the attendance log table using the column names in config.
+    config keys: table, col_pk, seq_pk, column1, column2, column3
+    """
+    table   = config["table"].upper() if db_type == "Oracle" else config["table"].lower()
+    col_pk  = config.get("col_pk",  "HR_ATT_LOG_ID")
+    seq_pk  = config.get("seq_pk",  "HR_EMP_INOUT_ID_S")
+    col1    = config["column1"]
+    col2    = config["column2"]
+    col3    = config["column3"]
+    col4    = config.get("column4", "")
+    cursor  = connection.cursor()
+    try:
+        if db_type == "Oracle":
+            extra_col = f", {col4} VARCHAR2(100)" if col4 else ""
+            cursor.execute(f"""
+                CREATE TABLE {table} (
+                    {col_pk} NUMBER PRIMARY KEY,
+                    {col1} VARCHAR2(50),
+                    {col2} TIMESTAMP,
+                    {col3} VARCHAR2(200){extra_col}
+                )
+            """)
+            cursor.execute(f"CREATE SEQUENCE {seq_pk} START WITH 1 INCREMENT BY 1")
+        elif db_type == "PostgreSQL":
+            extra_col = f", {col4} VARCHAR(100)" if col4 else ""
+            cursor.execute(f"""
+                CREATE TABLE {table} (
+                    id SERIAL PRIMARY KEY,
+                    {col1} VARCHAR(50),
+                    {col2} TIMESTAMP,
+                    {col3} VARCHAR(200){extra_col},
+                    UNIQUE({col1}, {col2}, {col3})
+                )
+            """)
+        connection.commit()
+        cursor.close()
+        return True
+    except Exception as e:
+        logging.error(f"create_attendance_table error: {e}")
+        cursor.close()
+        raise
+
+
+def create_machine_table(connection, db_type, table_name, col_sn, col_ip, col_proto, col_company):
+    """
+    Create the machine-link table with user-supplied column names.
+    """
+    tbl    = table_name.upper() if db_type == "Oracle" else table_name.lower()
+    cursor = connection.cursor()
+    try:
+        if db_type == "Oracle":
+            cursor.execute(f"""
+                CREATE TABLE {tbl} (
+                    {col_sn} VARCHAR2(100) PRIMARY KEY,
+                    {col_ip} VARCHAR2(50),
+                    {col_proto} VARCHAR2(20),
+                    {col_company} VARCHAR2(200)
+                )
+            """)
+        elif db_type == "PostgreSQL":
+            cursor.execute(f"""
+                CREATE TABLE {tbl} (
+                    {col_sn} VARCHAR(100) PRIMARY KEY,
+                    {col_ip} VARCHAR(50),
+                    {col_proto} VARCHAR(20),
+                    {col_company} VARCHAR(200)
+                )
+            """)
+        connection.commit()
+        cursor.close()
+        return True
+    except Exception as e:
+        logging.error(f"create_machine_table error: {e}")
+        cursor.close()
+        raise
+
+def ensure_tables(connection, db_type, config):
+    """Verifies that required tables exist, and creates them if they don't."""
+    try:
+        cursor = connection.cursor()
+        
+        # 1. Ensure Attendance Logs Table
+        table_name = config.get("table", "HR_EMP_INOUT_DETAIL")
+        col1 = config.get("column1", "EMPLOYEE_NO")
+        col2 = config.get("column2", "SWAP_TIME")
+        col3 = config.get("column3", "MACHINE_REF")
+        
+        if db_type == "Oracle":
+            # Check if table exists
+            cursor.execute(f"SELECT count(*) FROM user_tables WHERE table_name = '{table_name.upper()}'")
+            if cursor.fetchone()[0] == 0:
+                logging.info(f"Creating Oracle table: {table_name}")
+                cursor.execute(f"""
+                    CREATE TABLE {table_name} (
+                        {config.get('col_pk', 'HR_ATT_LOG_ID')} NUMBER PRIMARY KEY,
+                        {col1} VARCHAR2(50),
+                        {col2} TIMESTAMP,
+                        {col3} VARCHAR2(200)
+                    )
+                """)
+                # Create Sequence
+                seq_name = config.get('seq_pk', 'HR_EMP_INOUT_ID_S')
+                cursor.execute(f"CREATE SEQUENCE {seq_name} START WITH 1 INCREMENT BY 1")
+
+            # Check COMP_MACHINE
+            cursor.execute("SELECT count(*) FROM user_tables WHERE table_name = 'COMP_MACHINE'")
+            if cursor.fetchone()[0] == 0:
+                logging.info("Creating Oracle table: COMP_MACHINE")
+                cursor.execute("""
+                    CREATE TABLE COMP_MACHINE (
+                        SN VARCHAR2(100) PRIMARY KEY,
+                        IP VARCHAR2(50),
+                        PROTOCOL VARCHAR2(20),
+                        COMPANY_NAME VARCHAR2(200)
+                    )
+                """)
+        
+        elif db_type == "PostgreSQL":
+            # Check COMP_MACHINE
+            cursor.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'comp_machine'")
+            if not cursor.fetchone():
+                logging.info("Creating PostgreSQL table: comp_machine")
+                cursor.execute("""
+                    CREATE TABLE comp_machine (
+                        sn VARCHAR(100) PRIMARY KEY,
+                        ip VARCHAR(50),
+                        protocol VARCHAR(20),
+                        company_name VARCHAR(200)
+                    )
+                """)
+
+            # Check Attendance Logs Table
+            cursor.execute(f"SELECT 1 FROM information_schema.tables WHERE table_name = '{table_name.lower()}'")
+            if not cursor.fetchone():
+                logging.info(f"Creating PostgreSQL table: {table_name}")
+                cursor.execute(f"""
+                    CREATE TABLE {table_name} (
+                        id SERIAL PRIMARY KEY,
+                        {col1} VARCHAR(50),
+                        {col2} TIMESTAMP,
+                        {col3} VARCHAR(200),
+                        UNIQUE({col1}, {col2}, {col3})
+                    )
+                """)
+
+        connection.commit()
+        cursor.close()
+    except Exception as e:
+        logging.error(f"Error ensuring tables: {e}")
+        # Non-fatal error, but log it
+
 def load_latest_config(selected_db_type):
-    # Instead of reading database.json, we now read from environment variables
+    # Try reading from database.json first
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as config_file:
+            try:
+                configs = json.load(config_file)
+                for config in configs:
+                    if config.get("database") == selected_db_type:
+                        return config
+            except Exception as e:
+                logging.error(f"Error parsing database.json: {e}")
+
+    # Fallback to environment variables for Oracle if not in JSON
     if selected_db_type == "Oracle":
         config = {
             "database": "Oracle",
@@ -35,24 +286,9 @@ def load_latest_config(selected_db_type):
         }
         return config
     
-    # Keep PostgreSQL logic intact (falling back to database.json if needed)
-    if not os.path.exists(CONFIG_FILE):
-        error_msg = f"Configuration file {CONFIG_FILE} does not exist."
-        logging.error(error_msg)
-        raise FileNotFoundError(error_msg)
-    
-    with open(CONFIG_FILE, 'r') as config_file:
-        configs = json.load(config_file)
-    
-    latest_config = None
-    for config in configs:
-        if config["database"] == selected_db_type:
-            latest_config = config
-    
-    if not latest_config:
-        error_msg = f"No configuration found for database type: {selected_db_type}"
-        logging.error(error_msg)
-        raise ValueError(error_msg)
+    error_msg = f"No configuration found for database type: {selected_db_type}"
+    logging.error(error_msg)
+    raise ValueError(error_msg)
     
 
 
@@ -83,11 +319,71 @@ def connect_db_oracle(config):
     pool = get_oracle_pool(config)
     try:
         connection = pool.acquire()
+        ensure_tables(connection, "Oracle", config)
         return connection
     except Exception as error:
         error_msg = f"Error acquiring connection from Oracle pool: {error}"
         logging.error(error_msg)
         raise Exception(error_msg)
+
+def connect_db_postgresql(config):
+    import psycopg2
+    try:
+        conn = psycopg2.connect(
+            host=config['host'],
+            port=config['port'],
+            user=config['username'],
+            password=config['password'],
+            dbname=config['dbname']
+        )
+        ensure_tables(conn, "PostgreSQL", config)
+        return conn
+    except Exception as error:
+        logging.error(f"PostgreSQL connection error: {error}")
+        raise Exception(f"PostgreSQL connection error: {error}")
+
+def insert_log_generic(records, machine_info, db_type="Oracle"):
+    """Insert logs into the currently configured active database."""
+    try:
+        config = load_latest_config(db_type)
+        if db_type == "Oracle":
+            conn = connect_db_oracle(config)
+            try:
+                insert_log_oracle(conn, records, machine_info, config)
+            finally:
+                conn.close()
+        elif db_type == "PostgreSQL":
+            conn = connect_db_postgresql(config)
+            try:
+                insert_log_postgresql(conn, records, machine_info, config)
+            finally:
+                conn.close()
+        return True
+    except Exception as e:
+        logging.error(f"Generic insert error ({db_type}): {e}")
+        raise
+
+def insert_log_postgresql(connection, attendance_records, machine_info, config):
+    """Inserts logs into PostgreSQL."""
+    try:
+        cursor = connection.cursor()
+        table = config['table']
+        col1 = config['column1']
+        col2 = config['column2']
+        col3 = config['column3']
+        
+        query = f"INSERT INTO {table} ({col1}, {col2}, {col3}) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING"
+        
+        batch_data = []
+        for att in attendance_records:
+            batch_data.append((str(att.user_id), att.timestamp, str(machine_info)))
+            
+        cursor.executemany(query, batch_data)
+        connection.commit()
+        cursor.close()
+    except Exception as e:
+        logging.error(f"PostgreSQL insert error: {e}")
+        raise
 
 def insert_log_oracle(connection, attendance_records, machine_info, config):
     """
@@ -108,12 +404,22 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         column2 = config['column2']
         column3 = config['column3']
         
-        # Build query matching the existing schema
-        # We try to insert CLIENT_ID and MACHINE_SN only if the columns exist.
-        # Otherwise, we fallback to the standard columns.
+        # New: Optional columns from screenshot
+        col_client = config.get('column4', 'CLIENT_ID')
+        client_val = config.get('client_id_val', '0')
+        
+        # Build query dynamically based on available columns
+        columns = [col_pk, column1, column2, column3]
+        placeholders = [f"{seq_pk}.NEXTVAL", ":emp_no", "TO_DATE(:swp_time, 'YYYY-MM-DD HH24:MI:SS')", ":mach_ref"]
+        
+        # Add CLIENT_ID if it's explicitly defined and we have a value
+        if col_client:
+            columns.append(col_client)
+            placeholders.append(":client_id")
+
         query = f"""
-        INSERT INTO {table} ({col_pk}, {column1}, {column2}, {column3})
-        SELECT {seq_pk}.NEXTVAL, :emp_no, TO_DATE(:swp_time, 'YYYY-MM-DD HH24:MI:SS'), :mach_ref
+        INSERT INTO {table} ({', '.join(columns)})
+        SELECT {', '.join(placeholders)}
         FROM dual
         WHERE NOT EXISTS (
             SELECT 1
@@ -134,11 +440,15 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
             else:
                 ts_str = str(ts)
                 
-            batch_data.append({
+            row = {
                 "emp_no": str(attendance.user_id), 
                 "swp_time": ts_str, 
                 "mach_ref": str(machine_info)
-            })
+            }
+            if col_client:
+                row["client_id"] = client_val
+                
+            batch_data.append(row)
         
         print(f"Executing bulk insert for {len(batch_data)} records from Device {machine_info}...")
         
@@ -215,3 +525,43 @@ def delete_machine_meta(connection, sn):
     except Exception as e:
         logging.error(f"Error deleting machine meta: {e}")
         return False
+
+def save_config(new_config):
+    """Save configuration to database.json."""
+    try:
+        configs = []
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                configs = json.load(f)
+        
+        # Update existing or add new
+        found = False
+        for i, cfg in enumerate(configs):
+            if cfg["database"] == new_config["database"]:
+                configs[i] = new_config
+                found = True
+                break
+        
+        if not found:
+            configs.append(new_config)
+            
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(configs, f, indent=4)
+        
+        # Reset pool to apply new config
+        reset_pools()
+        return True
+    except Exception as e:
+        logging.error(f"Error saving config: {e}")
+        return False
+
+def reset_pools():
+    """Close and clear existing database connection pools."""
+    global oracle_pool
+    if oracle_pool:
+        try:
+            oracle_pool.close()
+        except:
+            pass
+        oracle_pool = None
+    logging.info("Database pools have been reset.")

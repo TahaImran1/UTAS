@@ -10,7 +10,10 @@ import Companies from './pages/Companies'
 import Employees from './pages/Employees'
 import AttendanceLogs from './pages/AttendanceLogs'
 import Login from './pages/Login'
+import Signup from './pages/Signup'
 import ServerStatus from './pages/ServerStatus'
+import HealthDashboard from './pages/HealthDashboard'
+import DatabaseSettings from './pages/DatabaseSettings'
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('utas_token'))
@@ -24,6 +27,7 @@ export default function App() {
       <HashRouter>
         <Routes>
           <Route path="/login" element={<Login onLogin={handleLoginSuccess} />} />
+          <Route path="/signup" element={<Signup />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </HashRouter>
@@ -44,6 +48,8 @@ export default function App() {
               <Route path="/companies" element={<Companies />} />
               <Route path="/employees" element={<Employees />} />
               <Route path="/logs" element={<AttendanceLogs />} />
+              <Route path="/health" element={<HealthDashboard />} />
+              <Route path="/database" element={<DatabaseSettings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </div>

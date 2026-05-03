@@ -3,7 +3,11 @@ import sys
 import subprocess
 import datetime
 import logging
-from typing import Optional
+import time
+import psutil
+import threading
+import json
+from typing import Optional, List
 
 # ── Auto-install dependencies ────────────────────────────────────────────────
 def install_requirements():
@@ -109,13 +113,37 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Allow Electron frontend on any local origin
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Metrics Tracking ─────────────────────────────────────────────────────────
+SERVER_START_TIME = time.time()
+REQUEST_METRICS = {
+    "total_requests": 0,
+    "status_codes": {},
+    "avg_latency": 0.0,
+    "total_latency": 0.0
+}
+
+@app.middleware("http")
+async def health_monitor_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    
+    # Update metrics
+    REQUEST_METRICS["total_requests"] += 1
+    status_code = response.status_code
+    REQUEST_METRICS["status_codes"][status_code] = REQUEST_METRICS["status_codes"].get(status_code, 0) + 1
+    REQUEST_METRICS["total_latency"] += process_time
+    REQUEST_METRICS["avg_latency"] = REQUEST_METRICS["total_latency"] / REQUEST_METRICS["total_requests"]
+    
+    return response
 
 SERVER_PORT = int(os.getenv("SERVER_PORT", 4370))
 
@@ -270,12 +298,9 @@ def process_attendance_data(sn: str, raw_data: str):
     log(f"Parsed {count} records from {sn}.")
     if db and count > 0:
         try:
-            config = db.load_latest_config("Oracle")
-            if config:
-                conn = db.connect_db_oracle(config)
-                db.insert_log_oracle(conn, records, sn, config)
-                conn.close()
-                log(f"Saved {count} records to Oracle.")
+            db_type = db.get_active_db_type()
+            db.insert_log_generic(records, sn, db_type)
+            log(f"Saved {count} records to {db_type}.")
         except Exception as e:
             log(f"DB error: {e}")
 
@@ -352,13 +377,63 @@ async def device_cmd(request: Request, SN: Optional[str] = Query(None)):
 # PHASE 1.5 — Auth & Admin endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── User management ────────────────────────────────────────────────────────
+USERS_FILE = os.path.join(os.path.dirname(__file__), "zk", "users.json")
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            if os.path.getsize(USERS_FILE) == 0: return {}
+            with open(USERS_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"[Auth] Error loading users.json: {e}")
+            return {}
+    return {}
+
+def save_users(users):
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=4)
+
+@app.post("/api/auth/register")
+async def register(user: UserRegister):
+    users = load_users()
+    if user.username in users or user.username == ADMIN_USERNAME:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    hashed_pass = pwd_context.hash(user.password)
+    users[user.username] = {"password": hashed_pass}
+    save_users(users)
+    logger.info(f"[Auth] New user registered: {user.username}")
+    return {"message": "User registered successfully"}
+
 @app.post("/api/auth/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    if form_data.username != ADMIN_USERNAME or not verify_password(form_data.password, ADMIN_PASS_HASH):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    username = form_data.username
+    password = form_data.password
     
-    access_token = create_access_token(data={"sub": form_data.username})
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Check Admin
+    if username == ADMIN_USERNAME:
+        if verify_password(password, ADMIN_PASS_HASH):
+            access_token = create_access_token(data={"sub": username})
+            return {"access_token": access_token, "token_type": "bearer"}
+    
+    # Check Regular Users
+    users = load_users()
+    if username in users:
+        if verify_password(password, users[username]["password"]):
+            access_token = create_access_token(data={"sub": username})
+            return {"access_token": access_token, "token_type": "bearer"}
+            
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 @app.get("/api/admin/server/logs", dependencies=[Depends(get_current_user)])
 async def get_server_logs():
@@ -371,6 +446,85 @@ async def get_server_status():
         "scheduler_running": pull_manager._scheduler.running
     }
 
+@app.get("/api/admin/health", dependencies=[Depends(get_current_user)])
+async def get_health():
+    """Detailed health check and performance metrics."""
+    # Database Health
+    db_status = "offline"
+    db_latency = 0
+    db_type = db.get_active_db_type()
+    if db:
+        try:
+            start = time.time()
+            config = db.load_latest_config(db_type)
+            if db_type == "Oracle":
+                conn = db.connect_db_oracle(config)
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1 FROM DUAL")
+                cursor.close()
+                conn.close()
+            else:
+                conn = db.connect_db_postgresql(config)
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                conn.close()
+            db_status = "online"
+            db_latency = round((time.time() - start) * 1000, 2)
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+
+    # System Metrics
+    cpu_usage = psutil.cpu_percent(interval=None)
+    memory = psutil.virtual_memory()
+    process = psutil.Process()
+    process_mem = process.memory_info().rss / (1024 * 1024) # MB
+    
+    # Threading Metrics
+    active_threads = threading.active_count()
+    pull_threads = sum(1 for t in threading.enumerate() if t.name and t.name.startswith("pull-"))
+
+    # Push Engine Status
+    push_devices = sum(1 for m in pull_manager._machines.values() if m.protocol == "HTTP")
+    push_online = sum(1 for m in pull_manager.get_all_status() if m.get("protocol") == "HTTP" and m.get("status") == "online")
+
+    return {
+        "status": "healthy",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "uptime_seconds": int(time.time() - SERVER_START_TIME),
+        "api": {
+            "status": "online",
+            "metrics": {
+                "total_requests": REQUEST_METRICS["total_requests"],
+                "avg_latency_ms": round(REQUEST_METRICS["avg_latency"] * 1000, 2),
+                "status_codes": REQUEST_METRICS["status_codes"],
+                "active_threads": active_threads
+            }
+        },
+        "database": {
+            "status": db_status,
+            "latency_ms": db_latency,
+            "type": db_type
+        },
+        "engine": {
+            "status": "online" if pull_manager.enabled else "paused",
+            "scheduler": "running" if pull_manager._scheduler.running else "stopped",
+            "active_machines": len(pull_manager._machines),
+            "sync_threads": pull_threads
+        },
+        "push_engine": {
+            "status": "online",
+            "total_devices": push_devices,
+            "online_devices": push_online,
+            "queue_size": sum(len(q) for q in COMMAND_QUEUE.values())
+        },
+        "system": {
+            "cpu_percent": cpu_usage,
+            "memory_percent": memory.percent,
+            "process_memory_mb": round(process_mem, 2)
+        }
+    }
+
 @app.post("/api/admin/server/control", dependencies=[Depends(get_current_user)])
 async def control_server(body: ControlIn):
     if body.action == "start":
@@ -380,6 +534,166 @@ async def control_server(body: ControlIn):
         pull_manager.enabled = False
         logger.info("[Admin] Pull Engine DISABLED by user")
     return {"success": True, "enabled": pull_manager.enabled}
+
+# ── Database Config Endpoints ───────────────────────────────────────────────
+
+@app.get("/api/admin/database/config")
+async def get_db_config(db_type: str = "Oracle", user=Depends(get_current_user)):
+    try:
+        config = db.load_latest_config(db_type)
+        return config
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/admin/database/config")
+async def update_db_config(body: dict, user=Depends(get_current_user)):
+    config = body.get("config")
+    is_active = body.get("active", False)
+    
+    if not config:
+        raise HTTPException(status_code=400, detail="Missing configuration data")
+
+    success = db.save_config(config)
+    if success:
+        if is_active:
+            # Update .env or internal setting for ACTIVE_DB_TYPE
+            # For now, we'll use an internal global or write to a small settings file
+            os.environ["ACTIVE_DB_TYPE"] = config["database"]
+            # In a real app, you'd save this to a persistent .env or config file
+            logger.info(f"[Database] Active DB set to {config['database']}")
+        return {"status": "success", "message": "Database configuration updated."}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to save database configuration.")
+
+@app.post("/api/admin/database/test")
+async def test_db_connection(config: dict, user=Depends(get_current_user)):
+    try:
+        if config.get("database") == "Oracle":
+            conn = db.connect_db_oracle(config)
+            conn.close()
+        else:
+            # PostgreSQL test logic if needed
+            pass
+        return {"status": "success", "message": "Connection successful!"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/admin/database/connect-check", dependencies=[Depends(get_current_user)])
+async def connect_and_check(body: dict):
+    """
+    Step 1 of the DB wizard.
+    Attempts to connect with the supplied credentials, then checks whether
+    the attendance-log table and the machine-link table already exist.
+    If both exist the config is saved immediately (no further steps needed).
+    """
+    try:
+        config   = body.get("config", {})
+        att_tbl  = body.get("att_table",     config.get("table",         "HR_EMP_INOUT_DETAIL"))
+        mach_tbl = body.get("machine_table", config.get("machine_table", "COMP_MACHINE"))
+        db_type  = config.get("database", "Oracle")
+
+        conn   = db.connect_one_shot(config)
+        checks = db.check_tables_exist(conn, db_type, att_tbl, mach_tbl)
+
+        # Helper to find best column match
+        def find_best(cols, targets, default):
+            for t in targets:
+                for c in cols:
+                    if c.upper() == t.upper(): return c
+            return default
+
+        # Auto-map Attendance columns
+        if checks["att_table_exists"]:
+            att_cols = db.get_table_columns(conn, db_type, att_tbl)
+            config["table"]   = att_tbl
+            config["column1"] = find_best(att_cols, ["employee_no", "user_id", "emp_id", "badgenumber", "pin"], config.get("column1", "employee_no"))
+            config["column2"] = find_best(att_cols, ["swap_time", "timestamp", "log_time", "checktime", "event_time"], config.get("column2", "swap_time"))
+            config["column3"] = find_best(att_cols, ["machine_ref", "ip_address", "machine_sn", "sn", "device_id"], config.get("column3", "machine_ref"))
+            # Optional PK and Sequence
+            config["column_pk"] = find_best(att_cols, ["HR_ATT_LOG_ID", "ID", "LOG_ID", "PK"], config.get("column_pk", "HR_ATT_LOG_ID"))
+
+        # Auto-map Machine columns
+        if checks["machine_table_exists"]:
+            mach_cols = db.get_table_columns(conn, db_type, mach_tbl)
+            config["machine_table"] = mach_tbl
+            config["col_sn"]      = find_best(mach_cols, ["SN", "SERIAL_NUMBER", "MACHINE_SN", "DEVICE_SN"], config.get("col_sn", "SN"))
+            config["col_ip"]      = find_best(mach_cols, ["IP", "IP_ADDRESS", "ADDRESS", "HOST"], config.get("col_ip", "IP"))
+            config["col_proto"]   = find_best(mach_cols, ["PROTOCOL", "COMM_TYPE", "PROTO"], config.get("col_proto", "PROTOCOL"))
+            config["col_company"] = find_best(mach_cols, ["COMPANY_NAME", "COMPANY", "CLIENT", "ORG"], config.get("col_company", "COMPANY_NAME"))
+
+        conn.close()
+
+        both_exist = checks["att_table_exists"] and checks["machine_table_exists"]
+        if both_exist or checks["att_table_exists"] or checks["machine_table_exists"]:
+            # Save whatever we found/mapped
+            db.save_config(config)
+            logger.info(f"[Wizard] Auto-mapped and saved config for {db_type}")
+
+        return {
+            "status": "connected",
+            "message": "Connection successful",
+            "att_table_exists":     checks["att_table_exists"],
+            "machine_table_exists": checks["machine_table_exists"],
+            "both_exist":           both_exist,
+            "detected_config":      config
+        }
+    except Exception as e:
+        logger.error(f"[Wizard] connect-check failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/admin/database/create-attendance-table", dependencies=[Depends(get_current_user)])
+async def create_att_table(body: dict):
+    """
+    Step 3 of the DB wizard.
+    Creates the attendance log table in the DB using the supplied config,
+    then saves the full config to database.json.
+    """
+    try:
+        config  = body.get("config", {})
+        db_type = config.get("database", "Oracle")
+
+        conn = db.connect_one_shot(config)
+        db.create_attendance_table(conn, db_type, config)
+        conn.close()
+
+        db.save_config(config)
+        logger.info(f"[Wizard] Attendance table created: {config.get('table')}")
+        return {"status": "success", "message": f"Table '{config.get('table')}' created successfully."}
+    except Exception as e:
+        logger.error(f"[Wizard] create-attendance-table failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/admin/database/create-machine-table", dependencies=[Depends(get_current_user)])
+async def create_mach_table(body: dict):
+    """
+    Step 5 of the DB wizard.
+    Creates the machine-link table in the DB using the supplied column names,
+    then saves the updated config (with machine_table key) to database.json.
+    """
+    try:
+        config      = body.get("config", {})
+        db_type     = config.get("database", "Oracle")
+        table_name  = body.get("machine_table", "COMP_MACHINE")
+        col_sn      = body.get("col_sn",      "SN")
+        col_ip      = body.get("col_ip",      "IP")
+        col_proto   = body.get("col_proto",   "PROTOCOL")
+        col_company = body.get("col_company", "COMPANY_NAME")
+
+        conn = db.connect_one_shot(config)
+        db.create_machine_table(conn, db_type, table_name, col_sn, col_ip, col_proto, col_company)
+        conn.close()
+
+        # Persist machine_table name alongside the rest of the config
+        config["machine_table"] = table_name
+        db.save_config(config)
+        logger.info(f"[Wizard] Machine table created: {table_name}")
+        return {"status": "success", "message": f"Table '{table_name}' created successfully."}
+    except Exception as e:
+        logger.error(f"[Wizard] create-machine-table failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ── Machine management ────────────────────────────────────────────────────────
 

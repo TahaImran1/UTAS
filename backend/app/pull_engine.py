@@ -230,8 +230,8 @@ class ZKPullManager:
                     except Exception:
                         machine_ref = state.ip
 
-                    # Insert to Oracle using existing db function
-                    self._insert_to_oracle(records, machine_ref)
+                    # Insert to Active Database using existing db function
+                    self._insert_to_db(records, machine_ref)
 
                     # Auto-delete from device if configured
                     if AUTO_DELETE:
@@ -255,16 +255,14 @@ class ZKPullManager:
                 state.status = "offline"
                 self._disconnect(state)
 
-    def _insert_to_oracle(self, records, machine_ref: str):
-        """Reuse the existing zk/db.py Oracle insert function."""
+    def _insert_to_db(self, records, machine_ref: str):
+        """Reuse the existing zk/db.py generic insert function."""
         try:
             from zk import db
-            config = db.load_latest_config("Oracle")
-            conn = db.connect_db_oracle(config)
-            db.insert_log_oracle(conn, records, machine_ref, config)
-            conn.close()
+            db_type = db.get_active_db_type()
+            db.insert_log_generic(records, machine_ref, db_type)
         except Exception as e:
-            logger.error(f"[PullEngine] Oracle insert error: {e}")
+            logger.error(f"[PullEngine] Database insert error: {e}")
             raise
 
     # ─── Manual / API-triggered operations ───────────────────────────────────────

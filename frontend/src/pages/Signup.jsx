@@ -1,24 +1,30 @@
 import React, { useState } from 'react'
-import { MdLock, MdPerson, MdLogin } from 'react-icons/md'
-import { login } from '../api/client'
-import { Link } from 'react-router-dom'
+import { MdLock, MdPerson, MdAssignmentInd, MdArrowBack } from 'react-icons/md'
+import { register } from '../api/client'
+import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 
-export default function Login({ onLogin }) {
+export default function Signup() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
+  const navigate = useNavigate()
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (password !== confirmPassword) {
+      toast.error('Passwords do not match')
+      return
+    }
+    
     setLoading(true)
     try {
-      const res = await login(username, password)
-      localStorage.setItem('utas_token', res.data.access_token)
-      toast.success('Login Successful')
-      onLogin()
+      await register(username, password)
+      toast.success('Registration successful! Please login.')
+      navigate('/login')
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Login Failed')
+      toast.error(err.response?.data?.detail || 'Registration failed')
     } finally {
       setLoading(false)
     }
@@ -29,8 +35,8 @@ export default function Login({ onLogin }) {
       <div className="login-card">
         <div className="login-header">
            <div className="logo-circle">UTAS</div>
-           <h1>Sign In</h1>
-           <p>Unified Time Attendance System</p>
+           <h1>Create Account</h1>
+           <p>Register a new administrator account</p>
         </div>
         
         <form onSubmit={handleSubmit}>
@@ -38,7 +44,7 @@ export default function Login({ onLogin }) {
             <label><MdPerson /> Username</label>
             <input 
               type="text" 
-              placeholder="Enter username" 
+              placeholder="Choose a username" 
               value={username} 
               onChange={e => setUsername(e.target.value)}
               required
@@ -49,21 +55,33 @@ export default function Login({ onLogin }) {
             <label><MdLock /> Password</label>
             <input 
               type="password" 
-              placeholder="Enter password" 
+              placeholder="Create a password" 
               value={password} 
               onChange={e => setPassword(e.target.value)}
               required
             />
           </div>
 
+          <div className="form-group" style={{marginTop: '20px'}}>
+            <label><MdLock /> Confirm Password</label>
+            <input 
+              type="password" 
+              placeholder="Repeat password" 
+              value={confirmPassword} 
+              onChange={e => setConfirmPassword(e.target.value)}
+              required
+            />
+          </div>
+
           <button type="submit" className="btn btn-primary login-btn" disabled={loading}>
-            {loading ? 'Authenticating...' : <><MdLogin /> Sign In</>}
+            {loading ? 'Registering...' : <><MdAssignmentInd /> Sign Up</>}
           </button>
         </form>
         
         <div className="login-footer">
-          <p>Don't have an account? <Link to="/signup" style={{textDecoration: 'none', color: 'var(--color-accent)'}}>Create one</Link></p>
-          &copy; {new Date().getFullYear()} UTAS Administrator
+          <Link to="/login" style={{display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px', textDecoration: 'none', color: 'var(--color-accent)'}}>
+            <MdArrowBack /> Back to Login
+          </Link>
         </div>
       </div>
 
@@ -123,8 +141,7 @@ export default function Login({ onLogin }) {
         .login-footer {
           text-align: center;
           margin-top: 30px;
-          font-size: 0.8rem;
-          color: #999;
+          font-size: 0.9rem;
         }
       `}</style>
     </div>
