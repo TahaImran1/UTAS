@@ -1,4 +1,4 @@
-"""
+﻿"""
 machines_config.py
 ------------------
 CRUD helper for machines.json.
@@ -8,7 +8,16 @@ import json
 import os
 import logging
 
-MACHINES_FILE = os.path.join(os.path.dirname(__file__), "zk", "machines.json")
+def get_app_data_dir():
+    app_data = os.getenv('APPDATA')
+    if not app_data:
+        app_data = os.path.expanduser("~")
+    dir_path = os.path.join(app_data, "UTAS")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+APP_DATA_DIR = get_app_data_dir()
+MACHINES_FILE = os.path.join(APP_DATA_DIR, "machines.json")
 logger = logging.getLogger(__name__)
 
 
@@ -17,8 +26,14 @@ def load_machines() -> list:
     if not os.path.exists(MACHINES_FILE):
         return []
     try:
-        with open(MACHINES_FILE, "r") as f:
-            return json.load(f)
+        with open(MACHINES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return [data]
+        if isinstance(data, list):
+            return [m for m in data if isinstance(m, dict)]
+        logger.error(f"machines.json has unexpected type: {type(data)}")
+        return []
     except Exception as e:
         logger.error(f"Error loading machines.json: {e}")
         return []
@@ -97,3 +112,4 @@ def get_machine(sn: str = "", ip: str = "", port: int = 4370) -> dict | None:
         if not sn and m.get("ip") == ip and int(m.get("port", 4370)) == port:
             return m
     return None
+

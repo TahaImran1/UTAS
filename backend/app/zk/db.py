@@ -7,8 +7,17 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__),"database.json")
-LOG_FILE    = os.path.join(os.path.dirname(__file__),"errors.log")
+def get_app_data_dir():
+    app_data = os.getenv('APPDATA')
+    if not app_data:
+        app_data = os.path.expanduser("~")
+    dir_path = os.path.join(app_data, "UTAS")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+APP_DATA_DIR = get_app_data_dir()
+CONFIG_FILE = os.path.join(APP_DATA_DIR, "database.json")
+LOG_FILE    = os.path.join(APP_DATA_DIR, "errors.log")
 
 logging.basicConfig(
     filename = LOG_FILE,
@@ -16,9 +25,32 @@ logging.basicConfig(
     format   = '%(asctime)s:%(levelname)s:%(message)s'
 )
 
+ACTIVE_DB_FILE = os.path.join(APP_DATA_DIR, "active_db.txt")
+
 def get_active_db_type():
     """Returns the currently active database type (Oracle or PostgreSQL)."""
+    if os.path.exists(ACTIVE_DB_FILE):
+        try:
+            with open(ACTIVE_DB_FILE, "r") as f:
+                db_type = f.read().strip()
+                if db_type in ["Oracle", "PostgreSQL"]:
+                    return db_type
+        except Exception as e:
+            logging.error(f"Error reading active_db.txt: {e}")
     return os.getenv("ACTIVE_DB_TYPE", "Oracle")
+
+def set_active_db_type(db_type):
+    """Sets the active database type persistently."""
+    if db_type not in ["Oracle", "PostgreSQL"]:
+        raise ValueError(f"Invalid database type: {db_type}")
+    try:
+        with open(ACTIVE_DB_FILE, "w") as f:
+            f.write(db_type)
+        os.environ["ACTIVE_DB_TYPE"] = db_type
+        return True
+    except Exception as e:
+        logging.error(f"Error writing active_db.txt: {e}")
+        return False
 
 # ─── New: Wizard helpers ─────────────────────────────────────────────────────
 
@@ -468,12 +500,16 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
 
 # ─── New Mapping table functions (Iteration 2) ──────────────────────────────
 
-def get_machine_meta(connection):
-    """Retrieve all machine-to-company mappings from Oracle."""
+def get_machine_meta(connection, db_type="Oracle"):
+    """Retrieve all machine-to-company mappings from the database."""
     mappings = {}
     try:
         cursor = connection.cursor()
-        cursor.execute("SELECT SN, IP, PROTOCOL, COMPANY_NAME FROM COMP_MACHINE")
+        if db_type == "Oracle":
+            cursor.execute("SELECT SN, IP, PROTOCOL, COMPANY_NAME FROM COMP_MACHINE")
+        else:
+            cursor.execute("SELECT sn, ip, protocol, company_name FROM comp_machine")
+            
         for sn, ip, protocol, company in cursor.fetchall():
             mappings[sn] = {
                 "sn": sn,
@@ -484,46 +520,61 @@ def get_machine_meta(connection):
         cursor.close()
     except Exception as e:
         # Table might not exist yet, log and return empty
-        logging.warning(f"Error fetching machine meta: {e}")
+        logging.warning(f"Error fetching machine meta ({db_type}): {e}")
     return mappings
 
-def upsert_machine_meta(connection, sn, ip, protocol, company_name):
-    """Save or update a machine's mapping in Oracle."""
+def upsert_machine_meta(connection, sn, ip, protocol, company_name, db_type="Oracle"):
+    """Save or update a machine's mapping in the database."""
     try:
         cursor = connection.cursor()
-        query = """
-        MERGE INTO COMP_MACHINE target
-        USING (SELECT :sn AS sn, :ip AS ip, :protocol AS protocol, :company_name AS company_name FROM dual) src
-        ON (target.SN = src.sn)
-        WHEN MATCHED THEN
-          UPDATE SET target.IP = src.ip, target.PROTOCOL = src.protocol, target.COMPANY_NAME = src.company_name
-        WHEN NOT MATCHED THEN
-          INSERT (SN, IP, PROTOCOL, COMPANY_NAME)
-          VALUES (src.sn, src.ip, src.protocol, src.company_name)
-        """
-        cursor.execute(query, {
-            "sn": sn,
-            "ip": ip,
-            "protocol": protocol,
-            "company_name": company_name
-        })
+        if db_type == "Oracle":
+            query = """
+            MERGE INTO COMP_MACHINE target
+            USING (SELECT :sn AS sn, :ip AS ip, :protocol AS protocol, :company_name AS company_name FROM dual) src
+            ON (target.SN = src.sn)
+            WHEN MATCHED THEN
+              UPDATE SET target.IP = src.ip, target.PROTOCOL = src.protocol, target.COMPANY_NAME = src.company_name
+            WHEN NOT MATCHED THEN
+              INSERT (SN, IP, PROTOCOL, COMPANY_NAME)
+              VALUES (src.sn, src.ip, src.protocol, src.company_name)
+            """
+            cursor.execute(query, {
+                "sn": sn,
+                "ip": ip,
+                "protocol": protocol,
+                "company_name": company_name
+            })
+        else:
+            query = """
+            INSERT INTO comp_machine (sn, ip, protocol, company_name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (sn) DO UPDATE 
+            SET ip = EXCLUDED.ip, 
+                protocol = EXCLUDED.protocol, 
+                company_name = EXCLUDED.company_name
+            """
+            cursor.execute(query, (sn, ip, protocol, company_name))
+            
         connection.commit()
         cursor.close()
         return True
     except Exception as e:
-        logging.error(f"Error upserting machine meta: {e}")
+        logging.error(f"Error upserting machine meta ({db_type}): {e}")
         return False
 
-def delete_machine_meta(connection, sn):
-    """Remove a mapping from Oracle."""
+def delete_machine_meta(connection, sn, db_type="Oracle"):
+    """Remove a mapping from the database."""
     try:
         cursor = connection.cursor()
-        cursor.execute("DELETE FROM COMP_MACHINE WHERE SN = :sn", {"sn": sn})
+        if db_type == "Oracle":
+            cursor.execute("DELETE FROM COMP_MACHINE WHERE SN = :sn", {"sn": sn})
+        else:
+            cursor.execute("DELETE FROM comp_machine WHERE sn = %s", (sn,))
         connection.commit()
         cursor.close()
         return True
     except Exception as e:
-        logging.error(f"Error deleting machine meta: {e}")
+        logging.error(f"Error deleting machine meta ({db_type}): {e}")
         return False
 
 def save_config(new_config):
@@ -547,6 +598,9 @@ def save_config(new_config):
             
         with open(CONFIG_FILE, 'w') as f:
             json.dump(configs, f, indent=4)
+        
+        # Save as active database type
+        set_active_db_type(new_config["database"])
         
         # Reset pool to apply new config
         reset_pools()

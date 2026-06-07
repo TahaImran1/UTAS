@@ -68,7 +68,7 @@ export default function DatabaseSettings() {
 
   /* load saved config on mount */
   useEffect(() => {
-    getDbConfig(creds.database).then(r => {
+    getDbConfig().then(r => {
       const d = r.data
       if (d) {
         setCreds(prev => ({ ...prev, ...d }))
@@ -81,7 +81,55 @@ export default function DatabaseSettings() {
     }).catch(() => {})
   }, [])
 
-  const handleCreds  = e => setCreds(p => ({ ...p, [e.target.name]: e.target.value }))
+  const loadConfigForType = (dbType) => {
+    getDbConfig(dbType).then(r => {
+      const d = r.data
+      if (d) {
+        setCreds(prev => ({ ...prev, ...d }))
+        if (d.table) {
+          setAttCols(prev => ({
+            ...prev,
+            table: d.table,
+            col_pk: d.col_pk || prev.col_pk,
+            seq_pk: d.seq_pk || prev.seq_pk,
+            column1: d.column1 || prev.column1,
+            column2: d.column2 || prev.column2,
+            column3: d.column3 || prev.column3,
+            column4: d.column4 || ''
+          }))
+        }
+        if (d.machine_table) {
+          setMachCols(prev => ({ ...prev, machine_table: d.machine_table }))
+        }
+      } else {
+        setCreds({
+          database: dbType,
+          host: '',
+          port: dbType === 'Oracle' ? '1521' : '5432',
+          username: '',
+          password: '',
+          dbname: ''
+        })
+      }
+    }).catch(() => {
+      setCreds({
+        database: dbType,
+        host: '',
+        port: dbType === 'Oracle' ? '1521' : '5432',
+        username: '',
+        password: '',
+        dbname: ''
+      })
+    })
+  }
+
+  const handleCreds = e => {
+    const { name, value } = e.target
+    setCreds(p => ({ ...p, [name]: value }))
+    if (name === 'database') {
+      loadConfigForType(value)
+    }
+  }
   const handleAtt    = e => setAttCols(p => ({ ...p, [e.target.name]: e.target.value }))
   const handleMach   = e => setMachCols(p => ({ ...p, [e.target.name]: e.target.value }))
 

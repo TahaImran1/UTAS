@@ -9,7 +9,7 @@ import threading
 import json
 from typing import Optional, List
 
-# ── Auto-install dependencies ────────────────────────────────────────────────
+# â”€â”€ Auto-install dependencies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def install_requirements():
     req_path = os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
     if os.path.exists(req_path):
@@ -20,7 +20,7 @@ def install_requirements():
             print(f"[!] Error auto-installing dependencies: {e}")
 
 install_requirements()
-# ────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
@@ -53,7 +53,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USER", "admin")
 # Default password is 'admin123' if not set in .env
 ADMIN_PASS_HASH = os.getenv("ADMIN_PASS_HASH", "$2b$12$HsX55kfXFpUGdXatBVl48OaojBm56HI0ZntORMuokZ0ISM/is.kh2")
 
-# ── Path setup ───────────────────────────────────────────────────────────────
+# â”€â”€ Path setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'zk'))
 
@@ -83,31 +83,34 @@ class DequeHandler(logging.Handler):
 log_buffer = DequeHandler()
 log_buffer.setFormatter(logging.Formatter("%(message)s"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s — %(message)s",
-    datefmt="%H:%M:%S"
-)
+import sys
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s â€” %(message)s"))
+root_logger.addHandler(console_handler)
+
 logger = logging.getLogger("utas")
 logger.addHandler(log_buffer)
+logger.propagate = True
 
 from contextlib import asynccontextmanager
 
-# ── Lifespan context manager ──────────────────────────────────────────────────
+# â”€â”€ Lifespan context manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
-    logger.info("[UTAS] Server starting — initialising pull engine...")
+    logger.info("[UTAS] Server starting â€” initialising pull engine...")
     pull_manager.start()
     
     yield
     
     # Shutdown logic
-    logger.info("[UTAS] Server shutting down — disconnecting devices...")
+    logger.info("[UTAS] Server shutting down â€” disconnecting devices...")
     pull_manager.stop()
 
 app = FastAPI(
-    title="UTAS — Unified Time Attendance System",
+    title="UTAS â€” Unified Time Attendance System",
     description="ZKTeco ADMS push server + pyzk pull engine",
     version="2.0.0",
     lifespan=lifespan
@@ -121,7 +124,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Metrics Tracking ─────────────────────────────────────────────────────────
+# â”€â”€ AMF60 / ZKTeco path-normalizer middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Some devices (e.g. AMF60) POST to '//' (double slash) because they have no
+# configurable server path. This middleware rewrites any double-slash path to
+# the standard ZKTeco ADMS endpoint /iclock/cdata so routing works correctly.
+from starlette.types import ASGIApp, Receive, Send, Scope
+
+class PathNormalizerMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http":
+            path: str = scope.get("path", "/")
+            raw_path: bytes = scope.get("raw_path", b"/")
+
+            # AMF60 and similar devices POST to '//' (double slash) which
+            # uvicorn normalizes to '/'. Detect this via raw_path or by
+            # checking if a root-path request comes from a device IP
+            is_double_slash = raw_path in (b"//", b"///")
+            is_root_from_device = (path == "/" and scope.get("method", "") == "POST")
+
+            if is_double_slash or is_root_from_device:
+                scope = dict(scope)
+                scope["path"] = "/iclock/cdata"
+                scope["raw_path"] = b"/iclock/cdata"
+        await self.app(scope, receive, send)
+
+app.add_middleware(PathNormalizerMiddleware)
+
+# â”€â”€ Metrics Tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SERVER_START_TIME = time.time()
 REQUEST_METRICS = {
     "total_requests": 0,
@@ -129,6 +161,51 @@ REQUEST_METRICS = {
     "avg_latency": 0.0,
     "total_latency": 0.0
 }
+
+@app.middleware("http")
+async def amf60_diagnostics_middleware(request: Request, call_next):
+    client_ip = request.client.host
+    # Check if request is from AMF-60 IP or contains FK push headers/params
+    is_amf60 = (
+        client_ip == "192.168.100.67"
+        or "192.168.100.67" in str(request.url)
+        or request.headers.get("request_code") is not None
+        or request.headers.get("dev_id") is not None
+    )
+
+    if is_amf60:
+        # Read request body without consuming it permanently
+        body_bytes = await request.body()
+        
+        async def receive():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+        request._receive = receive
+
+        # Log to file in the scratch directory
+        log_dir = os.path.join(os.path.dirname(__file__), "scratch")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "amf60_raw_requests.log")
+
+        with open(log_file, "a", encoding="utf-8") as f:
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+            f.write(f"=== RECEIVED REQUEST AT {now} ===\n")
+            f.write(f"Client IP: {client_ip}\n")
+            f.write(f"Method: {request.method}\n")
+            f.write(f"URL: {request.url}\n")
+            f.write("Headers:\n")
+            for k, v in request.headers.items():
+                f.write(f"  {k}: {v}\n")
+            f.write(f"Body length: {len(body_bytes)} bytes\n")
+            if body_bytes:
+                f.write("Body (Hex):\n")
+                f.write(f"  {body_bytes.hex()}\n")
+                f.write("Body (Decoded Text - UTF-8 / ASCII):\n")
+                f.write(f"  {body_bytes.decode('utf-8', errors='ignore')}\n")
+            f.write("=" * 60 + "\n\n")
+
+    response = await call_next(request)
+    return response
+
 
 @app.middleware("http")
 async def health_monitor_middleware(request: Request, call_next):
@@ -147,14 +224,17 @@ async def health_monitor_middleware(request: Request, call_next):
 
 SERVER_PORT = int(os.getenv("SERVER_PORT", 4370))
 
-# ── In-memory push log (Phase 1 viewer) ────────────────────────────────────
+# â”€â”€ In-memory push log (Phase 1 viewer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 RECENT_LOGS = []
 
 # Queue for ADMS device commands (Push)
 COMMAND_QUEUE = {}
 
+# Tracks FK devices that have already been sent the initial get_glog command
+FK_SYNCED_DEVICES = set()
 
-# ── Auth Utilities ───────────────────────────────────────────────────────────
+
+# â”€â”€ Auth Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -179,7 +259,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
     return username
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# â”€â”€ Pydantic models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class LoginIn(BaseModel):
     username: str
     password: str
@@ -195,10 +275,18 @@ class MachineIn(BaseModel):
     sn: str = ""
     protocol: str = "TCP" # TCP or HTTP
     company_name: str = "None"
+    driver: str = "zk"  # zk | fk (amt alias)
+    machine_no: int = 1
+    license: int = 1262
+    net_password: int = 0
+    pull_port: Optional[int] = None
 class TestConnectionIn(BaseModel):
     ip: str
     port: int = 4370
     password: int = 0
+    driver: str = "zk"
+    license: int = 1262
+    machine_no: int = 1
 
 class CompanyMapIn(BaseModel):
     company_name: str
@@ -207,31 +295,34 @@ class CompanyMapIn(BaseModel):
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 1 — Push (ADMS) endpoints  (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# PHASE 1 â€” Push (ADMS) endpoints  (unchanged)
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def log(msg):
-    print(f"[{datetime.datetime.now()}] {msg}")
+    logger.info(msg)
 
-def register_push_device(sn: str, ip: str):
-    """Auto-detect and add new push devices to the registry."""
+def register_push_device(sn: str, ip: str, fk_protocol: bool = False):
+    """Auto-detect push devices (ZKTeco ADMS or FK/AMT dual-mode)."""
     if not sn:
         return
     
-    # Register pulse heartbeat
     pull_manager.update_pulse(sn)
 
-    # Check if already registered
     existing = pull_manager.get_machine(sn=sn)
     if not existing:
-        logger.info(f"[AUTODETECT] New Push device found: SN={sn} from IP={ip}")
+        label = "FK" if fk_protocol else "Push"
+        logger.info(f"[AUTODETECT] New {label} device: SN={sn} from IP={ip}")
         company_val = "None"
         if db:
             try:
-                config_db = db.load_latest_config("Oracle")
-                conn = db.connect_db_oracle(config_db)
-                meta = db.get_machine_meta(conn)
+                db_type = db.get_active_db_type()
+                config_db = db.load_latest_config(db_type)
+                if db_type == "Oracle":
+                    conn = db.connect_db_oracle(config_db)
+                else:
+                    conn = db.connect_db_postgresql(config_db)
+                meta = db.get_machine_meta(conn, db_type=db_type)
                 conn.close()
                 if sn in meta:
                     company_val = meta[sn].get("company_name", "None")
@@ -239,24 +330,65 @@ def register_push_device(sn: str, ip: str):
                 logger.error(f"[AUTODETECT] Failed to fetch company metadata: {e}")
 
         try:
-            m = MachineIn(
-                ip=ip,
-                sn=sn,
-                location="Auto-Detected (Push)",
-                port=4370,
-                password=0,
-                protocol="HTTP",
-                company_name=company_val
-            )
+            if fk_protocol:
+                m = MachineIn(
+                    ip=ip,
+                    sn=sn,
+                    location="Auto-Detected (FK)",
+                    port=5005,
+                    password=0,
+                    protocol="TCP",
+                    driver="fk",
+                    company_name=company_val,
+                )
+            else:
+                m = MachineIn(
+                    ip=ip,
+                    sn=sn,
+                    location="Auto-Detected (Push)",
+                    port=4370,
+                    password=0,
+                    protocol="HTTP",
+                    company_name=company_val,
+                )
             # dict() instead of model_dump() for backwards compatibility, or just use what works
-            pull_manager.add_machine(m.dict() if hasattr(m, "dict") else m.model_dump())
+            pull_manager.add_machine(m.model_dump())
         except Exception as e:
             logger.error(f"[AUTODETECT] Failed to register {sn}: {e}")
     else:
-        # BUG FIX: Force update protocol to HTTP if it's currently TCP/None for a push device
-        if existing.get("protocol") != "HTTP":
-            pull_manager.update_machine_metadata(sn, "HTTP", existing.get("company_name", "None"))
-            logger.info(f"[AUTODETECT] Corrected protocol for {sn} to HTTP")
+        current_proto = existing.get("protocol")
+        current_driver = (existing.get("driver") or "zk").lower()
+        current_company = existing.get("company_name", "None")
+        updated_company = current_company
+
+        if fk_protocol and current_driver not in ("fk", "amt"):
+            pull_manager.update_fk_device_metadata(sn, company=current_company)
+        elif not fk_protocol and current_proto != "HTTP":
+            pull_manager.update_machine_metadata(sn, "HTTP", current_company)
+
+        if current_company == "None" and db:
+            try:
+                db_type = db.get_active_db_type()
+                config_db = db.load_latest_config(db_type)
+                if db_type == "Oracle":
+                    conn = db.connect_db_oracle(config_db)
+                else:
+                    conn = db.connect_db_postgresql(config_db)
+                meta = db.get_machine_meta(conn, db_type=db_type)
+                conn.close()
+                if sn in meta:
+                    db_company = meta[sn].get("company_name", "None")
+                    if db_company != "None":
+                        updated_company = db_company
+                        logger.info(f"[AUTODETECT] Synced company for {sn} from database: {db_company}")
+            except Exception as e:
+                logger.error(f"[AUTODETECT] Failed to sync company metadata for {sn}: {e}")
+
+        if not fk_protocol and (current_proto != "HTTP" or current_driver != "zk" or updated_company != current_company):
+            pull_manager.update_machine_metadata(sn, "HTTP", updated_company)
+            logger.info(f"[AUTODETECT] Updated metadata for {sn}: protocol=HTTP, company={updated_company}")
+        elif fk_protocol and updated_company != current_company:
+            pull_manager.update_fk_device_metadata(sn, company=updated_company)
 
 
 
@@ -265,9 +397,10 @@ def process_attendance_data(sn: str, raw_data: str):
     # MANDATORY CHECK: Machine must be assigned to a company
     state = pull_manager.get_machine(sn=sn)
     company = state.get("company_name") if state else "None"
-    
+    logger.info(f"[PROCESS ATT] SN={sn} company={company} raw_len={len(raw_data)} preview={raw_data[:120]!r}")
+
     if company in ["None", "", None]:
-        logger.warning(f"[PUSH ACCESS DENIED] Data from {sn} ignored - Machine not registered to a company.")
+        logger.warning(f"[PUSH ACCESS DENIED] Data from {sn} ignored — no company assigned. Assign a company first.")
         return
 
     count = 0
@@ -337,6 +470,206 @@ async def receive_cdata(
     table: Optional[str] = Query(None)
 ):
     ip = request.client.host
+    body_bytes = await request.body()
+    body_text = body_bytes.decode('utf-8', errors='ignore')
+
+    req_code = request.headers.get("request_code")
+    dev_id = request.headers.get("dev_id")
+
+    # Handle FK protocol devices (like AMF60)
+    if req_code or dev_id:
+        SN = dev_id or SN
+        register_push_device(SN, ip, fk_protocol=True)
+
+        # Echo FK protocol transactional headers
+        trans_id = request.headers.get("trans_id")
+        blk_no = request.headers.get("blk_no")
+
+        def make_headers(response_code: str = "SUCCESS") -> dict:
+            hdrs = {"response_code": response_code, "Connection": "close"}
+            if trans_id is not None:
+                hdrs["trans_id"] = trans_id
+            if blk_no is not None:
+                hdrs["blk_no"] = blk_no
+            return hdrs
+
+        # ── FULL DIAGNOSTIC DUMP ──────────────────────────────────────────
+        hdrs = dict(request.headers)
+        logger.info(f"[FK RAW] ip={ip} SN={SN} req_code={req_code} body_len={len(body_text)}")
+        logger.info(f"[FK HDR] {hdrs}")
+        if body_text.strip():
+            safe_body = body_text[:500].encode('ascii', errors='backslashreplace').decode('ascii')
+            logger.info(f"[FK BODY] {safe_body!r}")
+        # ───────────────────────────────────────────────────────────────────
+
+        log(f"[FK CDATA HIT] ip={ip} SN={SN} req_code={req_code}")
+
+        # --- Robust JSON extraction (handles binary wrappers) ---
+        data = {}
+        try:
+            # Find the first '{' character
+            start = body_text.find('{')
+            if start != -1:
+                # Use JSONDecoder to find the exact end of the JSON object
+                decoder = json.JSONDecoder()
+                obj, end = decoder.raw_decode(body_text[start:])
+                data = obj
+                logger.info(f"[FK PUSH] Parsed JSON keys: {list(data.keys())}")
+            else:
+                logger.warning("[FK PUSH] No '{' found in body")
+        except Exception as e:
+            logger.error(f"[FK PUSH] JSON decode error: {e}")
+
+        cloudtime = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+        if req_code == "receive_cmd":
+            logger.info(f"[DEBUG] COMMAND_QUEUE for {SN}: {COMMAND_QUEUE.get(SN)}")
+            # Device polling for commands
+            if SN and SN not in FK_SYNCED_DEVICES:
+                FK_SYNCED_DEVICES.add(SN)
+                log(f"[FK PUSH] Device {SN} registered")
+                if SN not in COMMAND_QUEUE:
+                    COMMAND_QUEUE[SN] = []
+                COMMAND_QUEUE[SN].append("get_glog")
+                logger.info(f"[FK AUTO-SYNC] Queued initial get_glog for {SN}")
+
+            # Send queued command if any
+            if SN and SN in COMMAND_QUEUE and COMMAND_QUEUE[SN]:
+                cmd_entry = COMMAND_QUEUE[SN].pop(0)
+                log(f"[FK PUSH] Sending command to {SN}: {cmd_entry}")
+                if cmd_entry.startswith("C:"):
+                    return PlainTextResponse(cmd_entry, headers=make_headers("SUCCESS"))
+                elif cmd_entry == "get_glog":
+                    end_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    resp = json.dumps({
+                        "ret": "ok", "result": True,
+                        "cloudtime": cloudtime, "wait": 0,
+                        "data": {
+                            "cmd": "get_glog",
+                            "cmdid": 1,
+                            "starttime": "2020-01-01 00:00:00",
+                            "endtime": end_ts
+                        }
+                    })
+                    return PlainTextResponse(resp, media_type="application/json",
+                                            headers=make_headers("SUCCESS"))
+                else:
+                    resp = json.dumps({"ret": "ok", "result": True, "cmd": cmd_entry, "cloudtime": cloudtime})
+                    return PlainTextResponse(resp, media_type="application/json",
+                                            headers=make_headers("SUCCESS"))
+            else:
+                resp = json.dumps({"ret": "ok", "result": False, "cloudtime": cloudtime})
+                return PlainTextResponse(resp, media_type="application/json",
+                                        headers=make_headers("ERROR_NO_CMD"))
+
+        elif req_code in ("get_glog", "getalllog", "get_attlog"):
+            # Bulk log upload from device
+            log(f"[FK PUSH] Received {req_code} bulk data from {SN} — body_len={len(body_text)}")
+            raw = body_text.strip()
+            if raw:
+                try:
+                    arr_match = re.search(r'\[.*\]', raw, re.DOTALL)
+                    if arr_match:
+                        records_json = json.loads(arr_match.group(0))
+                        lines = []
+                        for rec in records_json:
+                            uid = rec.get("user_id") or rec.get("uid") or rec.get("pin")
+                            ts = rec.get("io_time") or rec.get("time") or rec.get("checktime")
+                            if uid and ts and len(str(ts)) == 14:
+                                ts_fmt = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
+                                lines.append(f"{uid}\t{ts_fmt}")
+                        if lines:
+                            background_tasks.add_task(process_attendance_data, SN, "\n".join(lines))
+                    else:
+                        background_tasks.add_task(process_attendance_data, SN, raw)
+                except Exception:
+                    background_tasks.add_task(process_attendance_data, SN, raw)
+            return PlainTextResponse("result=OK", media_type="text/plain",
+                                    headers=make_headers("SUCCESS"))
+
+        elif req_code == "realtime_glog":
+            # Realtime attendance log push from FK device (e.g. AMF60)
+            user_id = data.get("user_id")
+            io_time = str(data.get("io_time", ""))
+            check_time = None
+
+            if user_id and io_time:
+                if len(io_time) == 14:
+                    # Compact format: YYYYMMDDHHmmss
+                    check_time = f"{io_time[0:4]}-{io_time[4:6]}-{io_time[6:8]} {io_time[8:10]}:{io_time[10:12]}:{io_time[12:14]}"
+                elif len(io_time) == 19:
+                    # Already formatted: YYYY-MM-DD HH:mm:ss
+                    check_time = io_time
+                else:
+                    logger.warning(f"[FK GLOG] Unexpected io_time format: {io_time!r} — attempting direct use")
+                    check_time = io_time
+
+            if user_id and check_time:
+                log(f"[FK PUSH] Realtime attendance: user_id={user_id} time={check_time} from {SN}")
+                background_tasks.add_task(process_attendance_data, SN, f"{user_id}\t{check_time}")
+            else:
+                logger.warning(f"[FK GLOG] Skipped — missing user_id={user_id!r} or io_time={io_time!r}")
+
+            # Return JSON so the device does not retry
+            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
+            return PlainTextResponse(resp, media_type="application/json",
+                                    headers=make_headers("SUCCESS"))
+
+        elif req_code == "realtime_enroll_data":
+            # Device is pushing a fingerprint enrollment record.
+            # Parse the JSON header (the first part of the body before the binary blob).
+            user_id = data.get("user_id", "unknown")
+            user_name = data.get("user_name", "")
+            privilege = data.get("user_privilege", "")
+            enroll_array = data.get("enroll_data_array", [])
+            backup_numbers = [e.get("backup_number") for e in enroll_array]
+            log(f"[FK ENROLL] user_id={user_id} name={user_name} privilege={privilege} fingers={backup_numbers} from {SN}")
+            # Respond with JSON so the device stops retrying
+            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
+            return PlainTextResponse(resp, media_type="application/json",
+                                    headers=make_headers("SUCCESS"))
+
+        else:
+            # Acknowledge any other unhandled FK request with JSON (not plain text)
+            # so the device does not retry indefinitely.
+            logger.info(f"[FK PUSH] Unhandled req_code={req_code}, acknowledging with JSON ok")
+            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
+            return PlainTextResponse(resp, media_type="application/json",
+                                    headers=make_headers("SUCCESS"))
+            # --- FALLBACK: Standard ZKTeco ADMS Protocol ---
+    # Unconditional debug log for standard push
+    print(f"[CDATA HIT] ip={ip} SN={SN} table={table} method={request.method} body_len={len(body_text)} body_preview={body_text[:300]}")
+
+    if not SN or not table:
+        from urllib.parse import parse_qs
+        try:
+            parsed = parse_qs(body_text.split('\n')[0].strip())
+            if not SN and 'SN' in parsed:
+                SN = parsed['SN'][0]
+            if not table and 'table' in parsed:
+                table = parsed['table'][0]
+        except Exception:
+            pass
+
+        if not SN:
+            for line in body_text.splitlines():
+                for part in line.replace('\t', '&').split('&'):
+                    part = part.strip()
+                    if part.upper().startswith('SN='):
+                        SN = part.split('=', 1)[1].strip()
+                        break
+                if SN:
+                    break
+        if not table:
+            for line in body_text.splitlines():
+                for part in line.replace('\t', '&').split('&'):
+                    part = part.strip()
+                    if part.lower().startswith('table='):
+                        table = part.split('=', 1)[1].strip()
+                        break
+                if table:
+                    break
+
     register_push_device(SN, ip)
 
     if request.method == 'GET':
@@ -344,20 +677,23 @@ async def receive_cdata(
         return "OK"
     if table == 'ATTLOG':
         log(f"Received ATTLOG from {SN}")
-        body = await request.body()
-        raw_data = body.decode('utf-8', errors='ignore')
-        background_tasks.add_task(process_attendance_data, SN, raw_data)
+        background_tasks.add_task(process_attendance_data, SN, body_text)
         return "OK"
     elif table == 'OPERLOG':
         return "OK"
+
+    logger.info(f"[PUSH] Device SN={SN} table={table} from {ip} â€” body length={len(body_text)}")
     return "OK"
+
+
+# Root handler removed â€” PathNormalizerMiddleware rewrites // â†’ /iclock/cdata
 
 
 @app.get("/iclock/getrequest", response_class=PlainTextResponse)
 async def get_request(request: Request, SN: Optional[str] = Query(None)):
     ip = request.client.host
     if SN:
-        register_push_device(SN, ip)
+        register_push_device(SN, ip, fk_protocol=False)
         log(f"Device {SN} getrequest from {ip}")
         if SN in COMMAND_QUEUE and COMMAND_QUEUE[SN]:
             cmd = COMMAND_QUEUE[SN].pop(0)
@@ -373,12 +709,21 @@ async def device_cmd(request: Request, SN: Optional[str] = Query(None)):
     return "OK"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 1.5 — Auth & Admin endpoints
-# ═══════════════════════════════════════════════════════════════════════════════
+# â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
+# PHASE 1.5 â€” Auth & Admin endpoints
+# â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• â• 
 
-# ── User management ────────────────────────────────────────────────────────
-USERS_FILE = os.path.join(os.path.dirname(__file__), "zk", "users.json")
+# â”€â”€ User management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def get_app_data_dir():
+    app_data = os.getenv('APPDATA')
+    if not app_data:
+        app_data = os.path.expanduser("~")
+    dir_path = os.path.join(app_data, "UTAS")
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+APP_DATA_DIR = get_app_data_dir()
+USERS_FILE = os.path.join(APP_DATA_DIR, "users.json")
 
 class UserRegister(BaseModel):
     username: str
@@ -535,11 +880,13 @@ async def control_server(body: ControlIn):
         logger.info("[Admin] Pull Engine DISABLED by user")
     return {"success": True, "enabled": pull_manager.enabled}
 
-# ── Database Config Endpoints ───────────────────────────────────────────────
+# â”€â”€ Database Config Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/admin/database/config")
-async def get_db_config(db_type: str = "Oracle", user=Depends(get_current_user)):
+async def get_db_config(db_type: Optional[str] = None, user=Depends(get_current_user)):
     try:
+        if not db_type:
+            db_type = db.get_active_db_type()
         config = db.load_latest_config(db_type)
         return config
     except Exception as e:
@@ -555,12 +902,8 @@ async def update_db_config(body: dict, user=Depends(get_current_user)):
 
     success = db.save_config(config)
     if success:
-        if is_active:
-            # Update .env or internal setting for ACTIVE_DB_TYPE
-            # For now, we'll use an internal global or write to a small settings file
-            os.environ["ACTIVE_DB_TYPE"] = config["database"]
-            # In a real app, you'd save this to a persistent .env or config file
-            logger.info(f"[Database] Active DB set to {config['database']}")
+        db.set_active_db_type(config["database"])
+        logger.info(f"[Database] Active DB set to {config['database']}")
         return {"status": "success", "message": "Database configuration updated."}
     else:
         raise HTTPException(status_code=500, detail="Failed to save database configuration.")
@@ -572,8 +915,8 @@ async def test_db_connection(config: dict, user=Depends(get_current_user)):
             conn = db.connect_db_oracle(config)
             conn.close()
         else:
-            # PostgreSQL test logic if needed
-            pass
+            conn = db.connect_db_postgresql(config)
+            conn.close()
         return {"status": "success", "message": "Connection successful!"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -695,9 +1038,11 @@ async def create_mach_table(body: dict):
         logger.error(f"[Wizard] create-machine-table failed: {e}")
         return {"status": "error", "message": str(e)}
 
-# ── Machine management ────────────────────────────────────────────────────────
+# —————————————————— Machine management ————————————————————————————————————————————————————————————
 
-@app.get("/pull/machines", dependencies=[Depends(get_current_user)])
+
+#@app.get("/pull/machines", dependencies=[Depends(get_current_user)])
+@app.get("/pull/machines")
 async def list_machines():
     """List all machines with their live status."""
     return pull_manager.get_all_status()
@@ -706,7 +1051,7 @@ async def list_machines():
 @app.post("/pull/machines", dependencies=[Depends(get_current_user)])
 async def add_machine(machine: MachineIn):
     """Add a new machine (writes to machines.json)."""
-    result = pull_manager.add_machine(machine.dict())
+    result = pull_manager.add_machine(machine.model_dump())
     return result
 
 
@@ -714,9 +1059,13 @@ async def add_machine(machine: MachineIn):
 async def list_companies():
     """Return a list of unique company names registered in the system."""
     try:
-        config_db = db.load_latest_config("Oracle")
-        conn = db.connect_db_oracle(config_db)
-        meta = db.get_machine_meta(conn)
+        db_type = db.get_active_db_type()
+        config_db = db.load_latest_config(db_type)
+        if db_type == "Oracle":
+            conn = db.connect_db_oracle(config_db)
+        else:
+            conn = db.connect_db_postgresql(config_db)
+        meta = db.get_machine_meta(conn, db_type=db_type)
         conn.close()
         # Extract unique company names
         companies = sorted(list(set(m.get("company_name", "None") for m in meta.values())))
@@ -729,18 +1078,22 @@ async def list_companies():
 async def map_devices_to_company(body: CompanyMapIn):
     """Bulk link a list of Serial Numbers to a Company Name."""
     try:
-        config_db = db.load_latest_config("Oracle")
-        conn = db.connect_db_oracle(config_db)
+        db_type = db.get_active_db_type()
+        config_db = db.load_latest_config(db_type)
+        if db_type == "Oracle":
+            conn = db.connect_db_oracle(config_db)
+        else:
+            conn = db.connect_db_postgresql(config_db)
         
         for sn in body.sns:
-            # 1. Update Oracle
+            # 1. Update Database
             state = pull_manager.get_machine(sn=sn)
             ip = state.get("ip", "0.0.0.0") if state else "0.0.0.0"
             
             # Use current protocol or default to HTTP if SN mapping is happening
             proto = state.get("protocol", "HTTP")
             
-            db.upsert_machine_meta(conn, sn, ip, proto, body.company_name)
+            db.upsert_machine_meta(conn, sn, ip, proto, body.company_name, db_type=db_type)
             
             # 2. Update In-Memory Engine
             pull_manager.update_machine_metadata(sn, proto, body.company_name)
@@ -764,7 +1117,7 @@ def test_connection(body: TestConnectionIn):
     Returns firmware, SN, device name on success.
     Used by the UI 'Add Machine' flow.
     """
-    return pull_manager.test_connection(body.ip, body.port, body.password)
+    return pull_manager.test_connection(body.ip, body.port, body.password, body.driver, body.model_dump())
 
 
 @app.post("/pull/machines/reload", dependencies=[Depends(get_current_user)])
@@ -774,11 +1127,29 @@ async def reload_machines():
     return {"success": True, "machines": len(machines_config.load_machines())}
 
 
-# ── Attendance pull ───────────────────────────────────────────────────────────
+# â”€â”€ Attendance pull â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-@app.post("/pull/attendance/{sn}", dependencies=[Depends(get_current_user)])
+#@app.post("/pull/attendance/{sn}", dependencies=[Depends(get_current_user)])
+@app.post("/pull/attendance/{sn}")
 def manual_pull(sn: str):
-    """Manually trigger a one-shot attendance pull from the given machine."""
+    state = pull_manager.get_machine(sn=sn)
+    driver = (state.get("driver") or "zk").lower() if state else "zk"
+    if state and state.get("protocol") == "HTTP":
+        # Queue command to fetch historical logs
+        if sn not in COMMAND_QUEUE:
+            COMMAND_QUEUE[sn] = []
+        if driver in ("fk", "amt"):
+            COMMAND_QUEUE[sn].append("get_glog")
+            logger.info(f"[FK PUSH] Queued get_glog for {sn}")
+        else:
+            end_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cmd = f"C:101:DATA QUERY ATTLOG StartTime=2000-01-01 00:00:00\tEndTime={end_ts}"
+            COMMAND_QUEUE[sn].append(cmd)
+            logger.info(f"[ZK PUSH] Queued DATA QUERY ATTLOG (full history) for {sn}")
+        return {
+            "success": True,
+            "message": f"Sync command queued for {sn}. Device will upload logs within 60 seconds."
+        }
     result = pull_manager.pull_once(sn=sn)
     return result
 
@@ -790,14 +1161,18 @@ async def get_attendance_logs(
     limit: int = Query(200, description="Max rows to return")
 ):
     """
-    Query attendance logs from Oracle.
+    Query attendance logs from database.
     Used by the Attendance Logs page in the desktop app.
     """
     if not db:
         raise HTTPException(status_code=503, detail="Database module not available")
     try:
-        config = db.load_latest_config("Oracle")
-        conn = db.connect_db_oracle(config)
+        db_type = db.get_active_db_type()
+        config = db.load_latest_config(db_type)
+        if db_type == "Oracle":
+            conn = db.connect_db_oracle(config)
+        else:
+            conn = db.connect_db_postgresql(config)
         cursor = conn.cursor()
 
         table    = config["table"]
@@ -810,15 +1185,25 @@ async def get_attendance_logs(
         conditions = []
 
         if date:
-            conditions.append(f"TRUNC({col_time}) = TO_DATE(:date_val, 'YYYY-MM-DD')")
+            if db_type == "Oracle":
+                conditions.append(f"TRUNC({col_time}) = TO_DATE(:date_val, 'YYYY-MM-DD')")
+            else:
+                conditions.append(f"DATE({col_time}) = %(date_val)s::DATE")
             params["date_val"] = date
         if sn:
-            conditions.append(f"{col_mach} LIKE :sn_val")
+            if db_type == "Oracle":
+                conditions.append(f"{col_mach} LIKE :sn_val")
+            else:
+                conditions.append(f"{col_mach} LIKE %(sn_val)s")
             params["sn_val"] = f"%{sn}%"
 
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += f" ORDER BY {col_time} DESC FETCH FIRST :limit ROWS ONLY"
+            
+        if db_type == "Oracle":
+            query += f" ORDER BY {col_time} DESC FETCH FIRST :limit ROWS ONLY"
+        else:
+            query += f" ORDER BY {col_time} DESC LIMIT %(limit)s"
         params["limit"] = limit
 
         cursor.execute(query, params)
@@ -834,7 +1219,7 @@ async def get_attendance_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Device management ─────────────────────────────────────────────────────────
+# â”€â”€ Device management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/pull/device-info/{sn}", dependencies=[Depends(get_current_user)])
 def device_info(sn: str):
@@ -861,8 +1246,13 @@ def sync_time(sn: str):
     return pull_manager.sync_time(sn=sn)
 
 
-# ── Dashboard stats ───────────────────────────────────────────────────────────
+# â”€â”€ Dashboard stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+
+@app.get("/pull/fk-bridge/health")
+def fk_bridge_health():
+    import fk_bridge_client
+    return fk_bridge_client.bridge_status()
 @app.get("/pull/stats", dependencies=[Depends(get_current_user)])
 async def dashboard_stats():
     """
@@ -910,7 +1300,7 @@ async def dashboard_stats():
     }
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if __name__ == "__main__":
     import uvicorn
     log(f"[*] Starting UTAS Server on 0.0.0.0:{SERVER_PORT}")

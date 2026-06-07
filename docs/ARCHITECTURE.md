@@ -2,26 +2,24 @@
 
 This document outlines the high-level architecture of the **UTAS (Unified Time Attendance System)**. The system is designed to handle both **Push (ADMS)** and **Pull (TCP)** protocols for ZKTeco attendance devices, providing a unified interface for data synchronization and device management.
 
-## High-Level Architecture (3-Tier)
+## High-Level Architecture (Block Diagram)
 
-![UTAS Architecture Diagram](C:\Users\ALIENWARE\.gemini\antigravity\brain\7a3d203d-e46a-46e5-b77b-bec63c0248b9\utas_architecture_diagram_1777834267124.png)
+This is a simplified view of the UTAS client-server model, showing the core components and their interactions.
+
+![UTAS Simple Block Diagram](./images/utas_simple_block_diagram.png)
 
 ```mermaid
-graph TD
-    UI["<b>Application</b><br/>User Interface (React)"]
-    Logic["<b>Business & Data Logic</b><br/>FastAPI / UTAS Engines"]
-    DB[("<b>Database</b><br/>Oracle / PostgreSQL")]
-    Devices["<b>Attendance Devices</b><br/>ZKTeco (Push/Pull)"]
+graph LR
+    Client[React Dashboard] <-->|"REST API (HTTP)"| Server[FastAPI Backend]
+    Server <--> DB[(Oracle/Postgres)]
+    Server <--> Devices[ZKTeco Hardware]
 
-    UI <--> Logic
-    Logic <--> DB
-    Devices --> Logic
-
-    style UI fill:#87CEEB,stroke:#333,stroke-width:2px
-    style Logic fill:#FFA500,stroke:#333,stroke-width:2px
-    style DB fill:#FFD700,stroke:#333,stroke-width:2px
-    style Devices fill:#D3D3D3,stroke:#333,stroke-width:2px
+    style Client fill:#fff,stroke:#333,stroke-width:2px
+    style Server fill:#fff,stroke:#333,stroke-width:2px
+    style DB fill:#fff,stroke:#333,stroke-width:2px
+    style Devices fill:#fff,stroke:#333,stroke-width:2px
 ```
+
 
 
 ## Detailed System Architecture
@@ -77,6 +75,74 @@ graph TB
 ```
 
 
+## Client-Server Architecture (Deployment Model)
+
+
+![UTAS Technical Architecture](./images/utas_technical_architecture.png)
+
+```mermaid
+graph LR
+    subgraph "Client Side (Frontend)"
+        Dashboard["<b>React Dashboard</b><br/>Desktop/Web UI"]
+        Wizard["<b>Config Wizard</b><br/>DB & Machine Setup"]
+        State["<b>Redux Store</b><br/>Local App State"]
+    end
+
+    subgraph "Server Side (Backend & Storage)"
+        API["<b>FastAPI Server</b><br/>REST Endpoints"]
+        Auth["<b>JWT Auth</b><br/>Security Layer"]
+        Engines["<b>Sync Engines</b><br/>Push/Pull Logic"]
+        DB[("<b>Enterprise DB</b><br/>Oracle/Postgres")]
+        Config["<b>Local Storage</b><br/>JSON Configs"]
+    end
+
+    subgraph "Edge Layer (Devices)"
+        Devices["<b>ZKTeco Machines</b><br/>TCP/HTTP Hardware"]
+    end
+
+    %% Client-Server Interactions
+    Dashboard <-->|"REST API (HTTPS)"| Auth
+    Auth <--> API
+    Wizard <-->|"Config Requests"| API
+    
+    %% Server Internal Interactions
+    API <--> Engines
+    API <--> DB
+    API <--> Config
+    Engines <--> DB
+    
+    %% Server-Device Interactions
+    Engines <-->|"Push (HTTP) / Pull (TCP)"| Devices
+
+    style Dashboard fill:#87CEEB,stroke:#333,stroke-width:2px
+    style API fill:#FFA500,stroke:#333,stroke-width:2px
+    style DB fill:#FFD700,stroke:#333,stroke-width:2px
+    style Devices fill:#D3D3D3,stroke:#333,stroke-width:2px
+```
+
+### 1. Client-Side (The Frontend)
+*   **Role**: The "Client" is the primary interface for users (administrators and HR personnel).
+*   **Technology**: Built with **React** and wrapped as a desktop application.
+*   **Responsibilities**:
+    *   Presenting real-time health data.
+    *   Orchestrating the multi-step Database Management Wizard.
+    *   Managing local state (Redux) to reduce unnecessary API calls.
+    *   Handling user authentication sessions via JWT.
+
+### 2. Server-Side (The Backend)
+*   **Role**: The "Server" acts as the central brain, managing data persistence, device communication, and business logic.
+*   **Technology**: Built with **FastAPI (Python)** for high performance and asynchronous capabilities.
+*   **Responsibilities**:
+    *   **API Management**: Serving RESTful endpoints for the frontend.
+    *   **Security**: Validating JWT tokens and securing administrative operations.
+    *   **Data Synchronization**: Running the **Push Server** and **Pull Engine** to bridge hardware and software.
+    *   **Persistence**: Ensuring data integrity across Oracle and PostgreSQL databases.
+
+### 3. Edge Layer (The Hardware)
+*   **Role**: Devices act as data sources (clients to the Push server) or data providers (servers to the Pull engine).
+*   **Communication**: Uses binary protocols over TCP (Port 4370) or HTTP-based ADMS protocols.
+
+
 ## Component Descriptions
 
 ### 1. User Interface Layer
@@ -101,3 +167,45 @@ graph TB
 2.  **Processing**: The backend parses raw data, validates company assignment, and formats records.
 3.  **Persistence**: Records are inserted into the configured `HR_EMP_INOUT_DETAIL` (or equivalent) table in the active database.
 4.  **Monitoring**: The frontend polls the API for live status updates, health metrics, and recent logs.
+
+## FK / AMT dual-mode devices
+
+Some attendance terminals (e.g. **AMF60** and other **FKAttend.dll** models) support:
+
+- **HTTP push** — FK headers (`request_code`, `dev_id`), real-time logs via `/iclock/cdata`
+- **TCP pull** — proprietary protocol on port **5005** (default), not compatible with pyzk
+
+UTAS handles these with `driver: "fk"` in `machines.json`:
+
+- Push path in `main.py` (auto-registers on first FK push as `Auto-Detected (FK)`)
+- Scheduled/manual pull uses **FkBridge** (`fk-bridge/`) via `FK_BRIDGE_URL` (default `http://127.0.0.1:5001`)
+- Health: `GET /pull/fk-bridge/health`
+- Pull engine never uses pyzk when `driver` is `fk` or `amt`
+
+Deploy **FKAttend.dll** (x86) next to `FkBridge.exe` — see `fk-bridge/copy-fk-dll.ps1` after publish.
+
+### AMF60 device settings (user manual)
+
+Full checklist: [AMF60_DEVICE_SETUP.md](AMF60_DEVICE_SETUP.md). Summary:
+
+| Device menu | Setting | Effect |
+|-------------|---------|--------|
+| `MENU > SetComm > Ethernet` | Port **5005** (fixed per manual) | FkBridge TCP target |
+| `MENU > SetComm > Net Mode` | **Local** | SDK inbound connect / historical pull |
+| `MENU > SetComm > Net Mode` | **Internet** | Cloud push to Server IP; no HTTP log poll in manual |
+| `MENU > U-Flash` | Download glog | USB backup when TCP unavailable |
+
+TCP/IP may be a **factory order option** only (not enableable in firmware later).
+
+### ZKTeco HTTP vs FK HTTP
+
+ZKTeco ADMS devices poll the server and accept `get_glog` for stored logs. FK/AMF devices in Internet mode push `realtime_glog` only; stored history requires **Local + port 5005** (FkBridge) or manual USB export.
+
+### Verification
+
+```powershell
+scripts\verify_amf60_tcp.ps1
+scripts\verify_fk_bridge_pull.ps1
+```
+
+Start stack: `scripts\start_utas_with_fk_bridge.bat`

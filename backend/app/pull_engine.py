@@ -203,6 +203,12 @@ class ZKPullManager:
             logger.debug(f"[PullEngine] {state.ip} skipped - Not mapped to a company.")
             return
 
+        # FK devices in HTTP push mode rely solely on push — no TCP bridge pull needed.
+        # Silently skip to avoid flooding the log with TCP connect warnings.
+        if getattr(state, "protocol", "TCP") == "HTTP":
+            logger.debug(f"[PullEngine] {state.sn or state.ip} is HTTP push-only — skipping TCP pull")
+            return
+
         with state.lock:
             if state.status == "syncing":
                 logger.debug(f"[PullEngine] {state.ip} already syncing, skipping")

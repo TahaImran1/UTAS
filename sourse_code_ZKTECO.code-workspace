@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../oracle"
+		},
+		{
+			"path": "../pyzk-master"
+		}
+	],
+	"settings": {}
+}

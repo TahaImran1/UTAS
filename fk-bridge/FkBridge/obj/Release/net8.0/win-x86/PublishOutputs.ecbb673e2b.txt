@@ -1,0 +1,6 @@
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\FkBridge.exe
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\appsettings.json
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\FkBridge.dll
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\FkBridge.deps.json
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\FkBridge.runtimeconfig.json
+e:\Projects\ZK\SUFI_LAST\sourse_code_ZKTECO\fk-bridge\FkBridge\bin\Release\net8.0\win-x86\publish\FkBridge.pdb

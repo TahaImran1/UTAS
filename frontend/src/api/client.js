@@ -32,7 +32,7 @@ export const register = (username, password) => client.post('/api/auth/register'
 export const getServerStatus = ()     => client.get('/api/admin/server/status')
 export const getServerLogs   = ()     => client.get('/api/admin/server/logs')
 export const getHealthStatus = ()     => client.get('/api/admin/health')
-export const getDbConfig = (type) => client.get(`/api/admin/database/config?db_type=${type}`)
+export const getDbConfig = (type) => client.get(type ? `/api/admin/database/config?db_type=${type}` : '/api/admin/database/config')
 export const saveDbConfig = (config) => client.post('/api/admin/database/config', config)
 export const testDbConnection = (config) => client.post('/api/admin/database/test', config)
 export const connectAndCheck = (payload) => client.post('/api/admin/database/connect-check', payload)

@@ -86,7 +86,7 @@ export default function HealthDashboard() {
               {health.database.status.toUpperCase()}
             </span>
           </div>
-          <h3>Oracle Database</h3>
+          <h3>{health.database.type} Database</h3>
           <div className="stat-line">
             <MdSpeed /> <span>Connection Latency:</span> <strong>{health.database.latency_ms}ms</strong>
           </div>

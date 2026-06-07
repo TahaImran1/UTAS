@@ -1,11 +1,13 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron')
 const path = require('path')
 const Store = require('electron-store')
+const { spawn } = require('child_process')
 
 const store = new Store()
 const isDev = !app.isPackaged
 
 let mainWindow
+let backendProcess = null
 
 function createWindow() {
   const { width, height, x, y } = store.get('windowBounds', {
@@ -49,9 +51,27 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-app.whenReady().then(createWindow)
+function startBackend() {
+  if (!isDev) {
+    const backendPath = path.join(process.resourcesPath, 'server.exe')
+    backendProcess = spawn(backendPath, [], {
+      detached: false,
+      windowsHide: true
+    })
+    backendProcess.stdout.on('data', (data) => console.log(`Backend: ${data}`))
+    backendProcess.stderr.on('data', (data) => console.error(`Backend Error: ${data}`))
+  }
+}
+
+app.whenReady().then(() => {
+  startBackend()
+  createWindow()
+})
 
 app.on('window-all-closed', () => {
+  if (backendProcess) {
+    backendProcess.kill()
+  }
   if (process.platform !== 'darwin') app.quit()
 })
 

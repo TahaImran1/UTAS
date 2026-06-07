@@ -15,7 +15,7 @@ export default function Employees() {
       <div className="empty-state">
         <MdPeople />
         <p>Employee management module under construction.</p>
-        <span style={{fontSize: '12px'}}>Will integrate with Oracle definitions.</span>
+        <span style={{fontSize: '12px'}}>Will integrate with external database definitions.</span>
       </div>
     </div>
   )

@@ -4,5 +4,8 @@
     },
     "tester_ok2": {
         "password": "$2b$12$kys6THrjKYm.BhuL8McBN.78EPi.Wwdt9XvjJN5HgHnzjg2RgZuiW"
+    },
+    "testadmin": {
+        "password": "$2b$12$qJOpUslLV25.lZWca.bkmu2wXxDCUetZV4ufPjgxc9OaRUr.SDYce"
     }
 }
