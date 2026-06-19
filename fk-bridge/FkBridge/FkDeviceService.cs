@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Options;
 
@@ -9,7 +9,7 @@ public sealed class FkBridgeOptions
     public int DefaultPort { get; set; } = 5005;
     public int DefaultTimeoutMs { get; set; } = 5000;
     public int DefaultMachineNo { get; set; } = 1;
-    public int DefaultLicense { get; set; } = 1262;
+    public int DefaultLicense { get; set; } = 1263;
     public int DefaultNetPassword { get; set; } = 0;
 }
 
@@ -62,39 +62,18 @@ public sealed class FkDeviceService
     public (bool ok, int handle, string? error) Connect(DeviceRequest req)
     {
         Resolve(req, out var port, out var machineNo, out var license, out var timeoutMs, out var netPassword);
-        var key = Key(req);
-        lock (LockFor(key))
-        {
-            if (_handles.TryGetValue(key, out var existing) && existing > 0)
-                return (true, existing, null);
+        var handle = FkAttendNative.FK_ConnectNet(
+            machineNo, req.Ip, port, timeoutMs,
+            (int)FkProtocolType.TcpIp, netPassword, license);
 
-            var handle = FkAttendNative.FK_ConnectNet(
-                machineNo, req.Ip, port, timeoutMs,
-                (int)FkProtocolType.TcpIp, netPassword, license);
+        if (handle <= 0)
+            return (false, handle, ErrorText(handle));
 
-            if (handle <= 0)
-                return (false, handle, ErrorText(handle));
-
-            _handles[key] = handle;
-            return (true, handle, null);
-        }
+        return (true, handle, null);
     }
 
     public void Disconnect(DeviceRequest req)
     {
-        var key = Key(req);
-        lock (LockFor(key))
-        {
-            if (_handles.TryRemove(key, out var handle) && handle > 0)
-                FkAttendNative.FK_DisConnect(handle);
-        }
-    }
-
-    private int EnsureHandle(DeviceRequest req, out string? error)
-    {
-        var (ok, handle, err) = Connect(req);
-        error = err;
-        return ok ? handle : 0;
     }
 
     private static bool Enable(int handle, byte flag, out string? error)
@@ -110,41 +89,48 @@ public sealed class FkDeviceService
         var key = Key(req);
         lock (LockFor(key))
         {
-            var handle = EnsureHandle(req, out var error);
-            if (handle <= 0) return (false, new(), error);
-
-            if (!Enable(handle, 0, out error)) return (false, new(), error);
+            var (ok, handle, error) = Connect(req);
+            if (!ok) return (false, new(), error);
 
             try
             {
-                var readMark = req.ReadMark ?? 0;
-                var loadRc = FkAttendNative.FK_LoadGeneralLogData(handle, readMark);
-                if (loadRc != (int)FkErrorCode.RunSuccess)
-                    return (false, new(), ErrorText(loadRc));
+                if (!Enable(handle, 0, out error)) return (false, new(), error);
 
-                var logs = new List<AttendanceLogDto>();
-                while (true)
+                try
                 {
-                    int enroll = 0, verify = 0, io = 0;
-                    var dt = DateTime.MinValue;
-                    var rc = FkAttendNative.FK_GetGeneralLogData(handle, ref enroll, ref verify, ref io, ref dt);
-                    if (rc == (int)FkErrorCode.RunErrDataArrayEnd) break;
-                    if (rc != (int)FkErrorCode.RunSuccess)
-                        return (false, logs, ErrorText(rc));
+                    var readMark = req.ReadMark ?? 0;
+                    var loadRc = FkAttendNative.FK_LoadGeneralLogData(handle, readMark);
+                    if (loadRc != (int)FkErrorCode.RunSuccess)
+                        return (false, new(), ErrorText(loadRc));
 
-                    logs.Add(new AttendanceLogDto
+                    var logs = new List<AttendanceLogDto>();
+                    while (true)
                     {
-                        UserId = enroll.ToString(),
-                        Timestamp = dt.ToString("yyyy-MM-dd HH:mm:ss"),
-                        VerifyMode = verify,
-                        InOutMode = io
-                    });
+                        int enroll = 0, verify = 0, io = 0;
+                        var dt = DateTime.MinValue;
+                        var rc = FkAttendNative.FK_GetGeneralLogData(handle, ref enroll, ref verify, ref io, ref dt);
+                        if (rc == (int)FkErrorCode.RunErrDataArrayEnd) break;
+                        if (rc != (int)FkErrorCode.RunSuccess)
+                            return (false, logs, ErrorText(rc));
+
+                        logs.Add(new AttendanceLogDto
+                        {
+                            UserId = enroll.ToString(),
+                            Timestamp = dt.ToString("yyyy-MM-dd HH:mm:ss"),
+                            VerifyMode = verify,
+                            InOutMode = io
+                        });
+                    }
+                    return (true, logs, null);
                 }
-                return (true, logs, null);
+                finally
+                {
+                    Enable(handle, 1, out _);
+                }
             }
             finally
             {
-                Enable(handle, 1, out _);
+                FkAttendNative.FK_DisConnect(handle);
             }
         }
     }
@@ -154,15 +140,23 @@ public sealed class FkDeviceService
         var key = Key(req);
         lock (LockFor(key))
         {
-            var handle = EnsureHandle(req, out var error);
-            if (handle <= 0) return (false, error);
-            if (!Enable(handle, 0, out error)) return (false, error);
+            var (ok, handle, error) = Connect(req);
+            if (!ok) return (false, error);
+
             try
             {
-                var rc = FkAttendNative.FK_EmptyGeneralLogData(handle);
-                return (rc == (int)FkErrorCode.RunSuccess, rc == (int)FkErrorCode.RunSuccess ? null : ErrorText(rc));
+                if (!Enable(handle, 0, out error)) return (false, error);
+                try
+                {
+                    var rc = FkAttendNative.FK_EmptyGeneralLogData(handle);
+                    return (rc == (int)FkErrorCode.RunSuccess, rc == (int)FkErrorCode.RunSuccess ? null : ErrorText(rc));
+                }
+                finally { Enable(handle, 1, out _); }
             }
-            finally { Enable(handle, 1, out _); }
+            finally
+            {
+                FkAttendNative.FK_DisConnect(handle);
+            }
         }
     }
 
@@ -171,28 +165,35 @@ public sealed class FkDeviceService
         var key = Key(req);
         lock (LockFor(key))
         {
-            var handle = EnsureHandle(req, out var error);
-            if (handle <= 0) return (false, new(), error);
+            var (ok, handle, error) = Connect(req);
+            if (!ok) return (false, new(), error);
 
-            var info = new Dictionary<string, object?>();
-            var dt = DateTime.Now;
-            if (FkAttendNative.FK_GetDeviceTime(handle, ref dt) == (int)FkErrorCode.RunSuccess)
-                info["device_time"] = dt.ToString("yyyy-MM-dd HH:mm:ss");
+            try
+            {
+                var info = new Dictionary<string, object?>();
+                var dt = DateTime.Now;
+                if (FkAttendNative.FK_GetDeviceTime(handle, ref dt) == (int)FkErrorCode.RunSuccess)
+                    info["device_time"] = dt.ToString("yyyy-MM-dd HH:mm:ss");
 
-            string serial = new(' ', 256);
-            if (FkAttendNative.FK_GetProductData(handle, (int)FkProductInfo.SerialNumber, ref serial)
-                == (int)FkErrorCode.RunSuccess)
-                info["serial_number"] = serial.Trim();
+                string serial = new(' ', 256);
+                if (FkAttendNative.FK_GetProductData(handle, (int)FkProductInfo.SerialNumber, ref serial)
+                    == (int)FkErrorCode.RunSuccess)
+                    info["serial_number"] = serial.Trim();
 
-            string product = new(' ', 256);
-            if (FkAttendNative.FK_GetProductData(handle, (int)FkProductInfo.ProductName, ref product)
-                == (int)FkErrorCode.RunSuccess)
-                info["product_name"] = product.Trim();
+                string product = new(' ', 256);
+                if (FkAttendNative.FK_GetProductData(handle, (int)FkProductInfo.ProductName, ref product)
+                    == (int)FkErrorCode.RunSuccess)
+                    info["product_name"] = product.Trim();
 
-            info["ip"] = req.Ip;
-            Resolve(req, out int port, out int machineNo, out int license, out int timeoutMs, out int netPassword);
-            info["port"] = port;
-            return (true, info, null);
+                info["ip"] = req.Ip;
+                Resolve(req, out int port, out int machineNo, out int license, out int timeoutMs, out int netPassword);
+                info["port"] = port;
+                return (true, info, null);
+            }
+            finally
+            {
+                FkAttendNative.FK_DisConnect(handle);
+            }
         }
     }
 
@@ -201,15 +202,23 @@ public sealed class FkDeviceService
         var key = Key(req);
         lock (LockFor(key))
         {
-            var handle = EnsureHandle(req, out var error);
-            if (handle <= 0) return (false, error);
-            if (!Enable(handle, 0, out error)) return (false, error);
+            var (ok, handle, error) = Connect(req);
+            if (!ok) return (false, error);
+
             try
             {
-                var rc = FkAttendNative.FK_SetDeviceTime(handle, DateTime.Now);
-                return (rc == (int)FkErrorCode.RunSuccess, rc == (int)FkErrorCode.RunSuccess ? null : ErrorText(rc));
+                if (!Enable(handle, 0, out error)) return (false, error);
+                try
+                {
+                    var rc = FkAttendNative.FK_SetDeviceTime(handle, DateTime.Now);
+                    return (rc == (int)FkErrorCode.RunSuccess, rc == (int)FkErrorCode.RunSuccess ? null : ErrorText(rc));
+                }
+                finally { Enable(handle, 1, out _); }
             }
-            finally { Enable(handle, 1, out _); }
+            finally
+            {
+                FkAttendNative.FK_DisConnect(handle);
+            }
         }
     }
 }

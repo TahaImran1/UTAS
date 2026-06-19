@@ -22,22 +22,18 @@ def install_requirements():
 install_requirements()
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException, Depends, status
+from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException, Depends, status, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from jose import JWTError, jwt
-from passlib.context import CryptContext
 from collections import deque
 
-load_dotenv()
-
-# --- SECURITY CONFIG ---
-SECRET_KEY = os.getenv("JWT_SECRET", "super-secret-key-123")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 1 day
+_dotenv_path = os.getenv("DOTENV_PATH")
+if _dotenv_path and os.path.exists(_dotenv_path):
+    load_dotenv(_dotenv_path, override=True)
+else:
+    load_dotenv()
 
 # Initialize DB
 db = None
@@ -46,12 +42,8 @@ try:
 except ImportError:
     pass
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
-
 ADMIN_USERNAME = os.getenv("ADMIN_USER", "admin")
-# Default password is 'admin123' if not set in .env
-ADMIN_PASS_HASH = os.getenv("ADMIN_PASS_HASH", "$2b$12$HsX55kfXFpUGdXatBVl48OaojBm56HI0ZntORMuokZ0ISM/is.kh2")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
 # â”€â”€ Path setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 sys.path.append(os.path.dirname(__file__))
@@ -233,31 +225,90 @@ COMMAND_QUEUE = {}
 # Tracks FK devices that have already been sent the initial get_glog command
 FK_SYNCED_DEVICES = set()
 
+ENROLL_VAR_INDEX = 0
 
-# â”€â”€ Auth Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def get_enroll_variations(user_id, backup_number, cloudtime, user_name):
+    # Returns a list of tuples: (description, body_dict_or_str, use_len_prefix, bin_prefix_type)
+    # bin_prefix_type: 0 = none, 1 = empty (4 bytes of 0), 2 = 4 bytes of data (0x00000004 + 4 bytes 0)
+    vars_list = []
+    
+    payloads = [
+        # 0. Standard response (like realtime_glog)
+        {"ret": "ok", "result": True, "cloudtime": cloudtime},
+        # 1. Simple success
+        {"ret": "ok", "result": True},
+        # 2. user_id as string
+        {"ret": "ok", "result": True, "user_id": user_id},
+        # 3. user_id and backup_number
+        {"ret": "ok", "result": True, "user_id": user_id, "backup_number": backup_number},
+        # 4. user_id, backup_number, cloudtime
+        {"ret": "ok", "result": True, "user_id": user_id, "backup_number": backup_number, "cloudtime": cloudtime},
+        # 5. user_id as int
+        {"ret": "ok", "result": True, "user_id": int(user_id) if user_id.isdigit() else user_id},
+        # 6. user_id as int, backup_number
+        {"ret": "ok", "result": True, "user_id": int(user_id) if user_id.isdigit() else user_id, "backup_number": backup_number},
+        # 7. user_id as int, backup_number, cloudtime
+        {"ret": "ok", "result": True, "user_id": int(user_id) if user_id.isdigit() else user_id, "backup_number": backup_number, "cloudtime": cloudtime},
+        # 8. Echoing user_name too
+        {"ret": "ok", "result": True, "user_id": user_id, "backup_number": backup_number, "user_name": user_name},
+        # 9. Echoing user_name with cloudtime
+        {"ret": "ok", "result": True, "user_id": user_id, "backup_number": backup_number, "user_name": user_name, "cloudtime": cloudtime},
+        # 10. Just ret ok
+        {"ret": "ok"},
+        # 11. Just result true
+        {"result": True}
+    ]
+    
+    for i, p in enumerate(payloads):
+        vars_list.append((f"Var {i}a (JSON len-prefix only): {p}", p, True, 0))
+        vars_list.append((f"Var {i}b (JSON len-prefix + empty bin-prefix): {p}", p, True, 1))
+        vars_list.append((f"Var {i}c (JSON len-prefix + 4-byte bin data): {p}", p, True, 2))
+        vars_list.append((f"Var {i}d (no prefixes): {p}", p, False, 0))
+        
+    return vars_list
 
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    return username
+
+
+# ── Auth Utilities ────────────────────────────────────────────────────────────
+import auth_helper
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Security
+
+security_bearer = HTTPBearer(auto_error=False)
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Security(security_bearer)):
+    # If the app is not initialized yet, block admin requests (except setup endpoints)
+    if not auth_helper.is_auth_initialized():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Setup required: Password has not been initialized."
+        )
+    
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated."
+        )
+        
+    token = credentials.credentials
+    if not auth_helper.validate_session(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired or invalid."
+        )
+    return "master"
+
+class InitializeIn(BaseModel):
+    password: str
+
+class MasterLoginIn(BaseModel):
+    password: str
+
+class ChangePasswordIn(BaseModel):
+    old_password: str
+    new_password: str
+
 
 # â”€â”€ Pydantic models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class LoginIn(BaseModel):
@@ -275,18 +326,30 @@ class MachineIn(BaseModel):
     sn: str = ""
     protocol: str = "TCP" # TCP or HTTP
     company_name: str = "None"
+    company_names: List[str] = []
+    name: str = ""
+    enabled: bool = True
     driver: str = "zk"  # zk | fk (amt alias)
     machine_no: int = 1
-    license: int = 1262
+    license: int = 1263
     net_password: int = 0
     pull_port: Optional[int] = None
+    sync_type: str = "interval"
+    sync_interval: int = 20
+    sync_days: List[str] = []
+    sync_time: str = "00:00"
+
 class TestConnectionIn(BaseModel):
     ip: str
     port: int = 4370
     password: int = 0
     driver: str = "zk"
-    license: int = 1262
+    license: int = 1263
     machine_no: int = 1
+    sync_type: str = "interval"
+    sync_interval: int = 20
+    sync_days: List[str] = []
+    sync_time: str = "00:00"
 
 class CompanyMapIn(BaseModel):
     company_name: str
@@ -313,33 +376,18 @@ def register_push_device(sn: str, ip: str, fk_protocol: bool = False):
     if not existing:
         label = "FK" if fk_protocol else "Push"
         logger.info(f"[AUTODETECT] New {label} device: SN={sn} from IP={ip}")
-        company_val = "None"
-        if db:
-            try:
-                db_type = db.get_active_db_type()
-                config_db = db.load_latest_config(db_type)
-                if db_type == "Oracle":
-                    conn = db.connect_db_oracle(config_db)
-                else:
-                    conn = db.connect_db_postgresql(config_db)
-                meta = db.get_machine_meta(conn, db_type=db_type)
-                conn.close()
-                if sn in meta:
-                    company_val = meta[sn].get("company_name", "None")
-            except Exception as e:
-                logger.error(f"[AUTODETECT] Failed to fetch company metadata: {e}")
-
         try:
             if fk_protocol:
                 m = MachineIn(
                     ip=ip,
                     sn=sn,
                     location="Auto-Detected (FK)",
-                    port=5005,
+                    port=4370,
                     password=0,
-                    protocol="TCP",
+                    protocol="HTTP",
                     driver="fk",
-                    company_name=company_val,
+                    company_name="None",
+                    company_names=[]
                 )
             else:
                 m = MachineIn(
@@ -349,9 +397,9 @@ def register_push_device(sn: str, ip: str, fk_protocol: bool = False):
                     port=4370,
                     password=0,
                     protocol="HTTP",
-                    company_name=company_val,
+                    company_name="None",
+                    company_names=[]
                 )
-            # dict() instead of model_dump() for backwards compatibility, or just use what works
             pull_manager.add_machine(m.model_dump())
         except Exception as e:
             logger.error(f"[AUTODETECT] Failed to register {sn}: {e}")
@@ -359,49 +407,31 @@ def register_push_device(sn: str, ip: str, fk_protocol: bool = False):
         current_proto = existing.get("protocol")
         current_driver = (existing.get("driver") or "zk").lower()
         current_company = existing.get("company_name", "None")
-        updated_company = current_company
 
         if fk_protocol and current_driver not in ("fk", "amt"):
             pull_manager.update_fk_device_metadata(sn, company=current_company)
         elif not fk_protocol and current_proto != "HTTP":
             pull_manager.update_machine_metadata(sn, "HTTP", current_company)
 
-        if current_company == "None" and db:
-            try:
-                db_type = db.get_active_db_type()
-                config_db = db.load_latest_config(db_type)
-                if db_type == "Oracle":
-                    conn = db.connect_db_oracle(config_db)
-                else:
-                    conn = db.connect_db_postgresql(config_db)
-                meta = db.get_machine_meta(conn, db_type=db_type)
-                conn.close()
-                if sn in meta:
-                    db_company = meta[sn].get("company_name", "None")
-                    if db_company != "None":
-                        updated_company = db_company
-                        logger.info(f"[AUTODETECT] Synced company for {sn} from database: {db_company}")
-            except Exception as e:
-                logger.error(f"[AUTODETECT] Failed to sync company metadata for {sn}: {e}")
-
-        if not fk_protocol and (current_proto != "HTTP" or current_driver != "zk" or updated_company != current_company):
-            pull_manager.update_machine_metadata(sn, "HTTP", updated_company)
-            logger.info(f"[AUTODETECT] Updated metadata for {sn}: protocol=HTTP, company={updated_company}")
-        elif fk_protocol and updated_company != current_company:
-            pull_manager.update_fk_device_metadata(sn, company=updated_company)
-
 
 
 def process_attendance_data(sn: str, raw_data: str):
-    """Background task: parse ADMS push data and insert to Oracle."""
-    # MANDATORY CHECK: Machine must be assigned to a company
+    """Parse ADMS push data and insert to company databases."""
     state = pull_manager.get_machine(sn=sn)
-    company = state.get("company_name") if state else "None"
-    logger.info(f"[PROCESS ATT] SN={sn} company={company} raw_len={len(raw_data)} preview={raw_data[:120]!r}")
+    company_names = state.get("company_names", []) if state else []
+    if not company_names:
+        m = machines_config.get_machine(sn=sn)
+        if m:
+            company_names = m.get("company_names", [])
+            if not company_names:
+                c_single = m.get("company_name")
+                company_names = [c_single] if c_single and c_single != "None" else []
+    
+    logger.info(f"[PROCESS ATT] SN={sn} companies={company_names} raw_len={len(raw_data)} preview={raw_data[:120]!r}")
 
-    if company in ["None", "", None]:
+    if not company_names:
         logger.warning(f"[PUSH ACCESS DENIED] Data from {sn} ignored — no company assigned. Assign a company first.")
-        return
+        raise ValueError(f"Machine {sn} is not assigned to any company.")
 
     count = 0
     records = []
@@ -431,11 +461,14 @@ def process_attendance_data(sn: str, raw_data: str):
     log(f"Parsed {count} records from {sn}.")
     if db and count > 0:
         try:
-            db_type = db.get_active_db_type()
-            db.insert_log_generic(records, sn, db_type)
-            log(f"Saved {count} records to {db_type}.")
+            db.insert_log_generic(records, sn, company_names)
+            log(f"Saved {count} records to databases.")
+            if sn in pull_manager._machines:
+                pull_manager._machines[sn].last_sync = datetime.datetime.now()
+                pull_manager._machines[sn].last_record_count = count
         except Exception as e:
             log(f"DB error: {e}")
+            raise e
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -476,6 +509,32 @@ async def receive_cdata(
     req_code = request.headers.get("request_code")
     dev_id = request.headers.get("dev_id")
 
+    # Resolve SN first
+    current_sn = dev_id or SN
+    if not current_sn:
+        from urllib.parse import parse_qs
+        try:
+            parsed = parse_qs(body_text.split('\n')[0].strip())
+            if 'SN' in parsed:
+                current_sn = parsed['SN'][0]
+        except Exception:
+            pass
+        if not current_sn:
+            for line in body_text.splitlines():
+                for part in line.replace('\t', '&').split('&'):
+                    part = part.strip()
+                    if part.upper().startswith('SN='):
+                        current_sn = part.split('=', 1)[1].strip()
+                        break
+                if current_sn:
+                    break
+
+    if current_sn:
+        state = pull_manager.get_machine(sn=current_sn)
+        if state and not state.get("enabled", True):
+            logger.warning(f"[ACCESS DENIED] Push from disabled machine SN={current_sn} rejected.")
+            return Response(content="DISABLED", status_code=403)
+
     # Handle FK protocol devices (like AMF60)
     if req_code or dev_id:
         SN = dev_id or SN
@@ -485,13 +544,50 @@ async def receive_cdata(
         trans_id = request.headers.get("trans_id")
         blk_no = request.headers.get("blk_no")
 
-        def make_headers(response_code: str = "SUCCESS") -> dict:
-            hdrs = {"response_code": response_code, "Connection": "close"}
+        def customize_headers(resp: Response, response_code: str = "SUCCESS") -> Response:
+            raw_hdrs = [
+                (b"Response_Code", response_code.encode("ascii")),
+                (b"Connection", b"close"),
+                (b"Content-Length", str(len(resp.body)).encode("ascii")),
+            ]
+            content_type = resp.headers.get("content-type", "application/octet-stream")
+            raw_hdrs.append((b"Content-Type", content_type.encode("ascii")))
             if trans_id is not None:
-                hdrs["trans_id"] = trans_id
+                raw_hdrs.append((b"Trans_Id", trans_id.encode("ascii")))
             if blk_no is not None:
-                hdrs["blk_no"] = blk_no
-            return hdrs
+                raw_hdrs.append((b"Blk_No", blk_no.encode("ascii")))
+            resp.raw_headers = raw_hdrs
+            return resp
+
+        import struct
+        def make_fk_response(resp_dict: dict, response_code: str = "SUCCESS") -> Response:
+            full_resp = resp_dict.copy()
+            full_resp.update({
+                "Response_Code": response_code,
+                "response_code": response_code,
+            })
+            if trans_id is not None:
+                try:
+                    tid_int = int(trans_id)
+                    full_resp["Trans_Id"] = tid_int
+                    full_resp["trans_id"] = tid_int
+                except:
+                    full_resp["Trans_Id"] = trans_id
+                    full_resp["trans_id"] = trans_id
+            if blk_no is not None:
+                try:
+                    bid_int = int(blk_no)
+                    full_resp["Blk_No"] = bid_int
+                    full_resp["blk_no"] = bid_int
+                except:
+                    full_resp["Blk_No"] = blk_no
+                    full_resp["blk_no"] = blk_no
+
+            resp_json = json.dumps(full_resp)
+            json_bytes = resp_json.encode("utf-8")
+            body_bytes = struct.pack("<I", len(json_bytes)) + json_bytes
+            resp = Response(content=body_bytes, media_type="application/octet-stream")
+            return customize_headers(resp, response_code)
 
         # ── FULL DIAGNOSTIC DUMP ──────────────────────────────────────────
         hdrs = dict(request.headers)
@@ -538,10 +634,10 @@ async def receive_cdata(
                 cmd_entry = COMMAND_QUEUE[SN].pop(0)
                 log(f"[FK PUSH] Sending command to {SN}: {cmd_entry}")
                 if cmd_entry.startswith("C:"):
-                    return PlainTextResponse(cmd_entry, headers=make_headers("SUCCESS"))
+                    return customize_headers(PlainTextResponse(cmd_entry), "SUCCESS")
                 elif cmd_entry == "get_glog":
                     end_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    resp = json.dumps({
+                    resp_data = {
                         "ret": "ok", "result": True,
                         "cloudtime": cloudtime, "wait": 0,
                         "data": {
@@ -550,23 +646,21 @@ async def receive_cdata(
                             "starttime": "2020-01-01 00:00:00",
                             "endtime": end_ts
                         }
-                    })
-                    return PlainTextResponse(resp, media_type="application/json",
-                                            headers=make_headers("SUCCESS"))
+                    }
+                    return make_fk_response(resp_data)
                 else:
-                    resp = json.dumps({"ret": "ok", "result": True, "cmd": cmd_entry, "cloudtime": cloudtime})
-                    return PlainTextResponse(resp, media_type="application/json",
-                                            headers=make_headers("SUCCESS"))
+                    resp_data = {"ret": "ok", "result": True, "cmd": cmd_entry, "cloudtime": cloudtime}
+                    return make_fk_response(resp_data)
             else:
-                resp = json.dumps({"ret": "ok", "result": False, "cloudtime": cloudtime})
-                return PlainTextResponse(resp, media_type="application/json",
-                                        headers=make_headers("ERROR_NO_CMD"))
+                resp_data = {"ret": "ok", "result": False, "cloudtime": cloudtime}
+                return make_fk_response(resp_data, "ERROR_NO_CMD")
 
         elif req_code in ("get_glog", "getalllog", "get_attlog"):
             # Bulk log upload from device
             log(f"[FK PUSH] Received {req_code} bulk data from {SN} — body_len={len(body_text)}")
             raw = body_text.strip()
             if raw:
+                import re
                 try:
                     arr_match = re.search(r'\[.*\]', raw, re.DOTALL)
                     if arr_match:
@@ -579,13 +673,13 @@ async def receive_cdata(
                                 ts_fmt = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
                                 lines.append(f"{uid}\t{ts_fmt}")
                         if lines:
-                            background_tasks.add_task(process_attendance_data, SN, "\n".join(lines))
+                            process_attendance_data(SN, "\n".join(lines))
                     else:
-                        background_tasks.add_task(process_attendance_data, SN, raw)
-                except Exception:
-                    background_tasks.add_task(process_attendance_data, SN, raw)
-            return PlainTextResponse("result=OK", media_type="text/plain",
-                                    headers=make_headers("SUCCESS"))
+                        process_attendance_data(SN, raw)
+                except Exception as e:
+                    logger.error(f"[FK PUSH] Sync failed: {e}")
+                    return make_fk_response({"ret": "fail", "result": False, "cloudtime": cloudtime}, "ERROR")
+            return customize_headers(PlainTextResponse("result=OK", media_type="text/plain"), "SUCCESS")
 
         elif req_code == "realtime_glog":
             # Realtime attendance log push from FK device (e.g. AMF60)
@@ -606,36 +700,86 @@ async def receive_cdata(
 
             if user_id and check_time:
                 log(f"[FK PUSH] Realtime attendance: user_id={user_id} time={check_time} from {SN}")
-                background_tasks.add_task(process_attendance_data, SN, f"{user_id}\t{check_time}")
+                try:
+                    process_attendance_data(SN, f"{user_id}\t{check_time}")
+                except Exception as e:
+                    logger.error(f"[FK PUSH] Sync failed: {e}")
+                    return make_fk_response({"ret": "fail", "result": False, "cloudtime": cloudtime}, "ERROR")
             else:
                 logger.warning(f"[FK GLOG] Skipped — missing user_id={user_id!r} or io_time={io_time!r}")
 
-            # Return JSON so the device does not retry
-            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
-            return PlainTextResponse(resp, media_type="application/json",
-                                    headers=make_headers("SUCCESS"))
+            resp_data = {"ret": "ok", "result": True, "cloudtime": cloudtime}
+            return make_fk_response(resp_data)
 
         elif req_code == "realtime_enroll_data":
-            # Device is pushing a fingerprint enrollment record.
-            # Parse the JSON header (the first part of the body before the binary blob).
-            user_id = data.get("user_id", "unknown")
+            global ENROLL_VAR_INDEX
+            user_id = data.get("user_id", "500")
             user_name = data.get("user_name", "")
-            privilege = data.get("user_privilege", "")
             enroll_array = data.get("enroll_data_array", [])
-            backup_numbers = [e.get("backup_number") for e in enroll_array]
-            log(f"[FK ENROLL] user_id={user_id} name={user_name} privilege={privilege} fingers={backup_numbers} from {SN}")
-            # Respond with JSON so the device stops retrying
-            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
-            return PlainTextResponse(resp, media_type="application/json",
-                                    headers=make_headers("SUCCESS"))
+            backup_number = enroll_array[0].get("backup_number", 0) if enroll_array else 0
+            
+            variations = get_enroll_variations(user_id, backup_number, cloudtime, user_name)
+            var_desc, var_payload, use_len_prefix, bin_prefix_type = variations[ENROLL_VAR_INDEX % len(variations)]
+            
+            logger.info(f"[SWITCHER] Try Variation {ENROLL_VAR_INDEX % len(variations)}: {var_desc}")
+            
+            # Increment index for the next request
+            ENROLL_VAR_INDEX += 1
+            
+            if isinstance(var_payload, str):
+                body_bytes = var_payload.encode("utf-8")
+                if use_len_prefix:
+                    import struct
+                    body_bytes = struct.pack("<I", len(body_bytes)) + body_bytes
+                resp = Response(content=body_bytes, media_type="text/plain" if not use_len_prefix else "application/octet-stream")
+                return customize_headers(resp, "SUCCESS")
+            else:
+                full_resp = var_payload.copy()
+                full_resp.update({
+                    "Response_Code": "SUCCESS",
+                    "response_code": "SUCCESS",
+                })
+                if trans_id is not None:
+                    try:
+                        tid_int = int(trans_id)
+                        full_resp["Trans_Id"] = tid_int
+                        full_resp["trans_id"] = tid_int
+                    except:
+                        full_resp["Trans_Id"] = trans_id
+                        full_resp["trans_id"] = trans_id
+                if blk_no is not None:
+                    try:
+                        bid_int = int(blk_no)
+                        full_resp["Blk_No"] = bid_int
+                        full_resp["blk_no"] = bid_int
+                    except:
+                        full_resp["Blk_No"] = blk_no
+                        full_resp["blk_no"] = blk_no
+
+                resp_json = json.dumps(full_resp)
+                json_bytes = resp_json.encode("utf-8")
+                
+                if use_len_prefix:
+                    import struct
+                    body_bytes = struct.pack("<I", len(json_bytes)) + json_bytes
+                    if bin_prefix_type == 1:
+                        # Append 4 bytes of 0 (empty binary length prefix)
+                        body_bytes += struct.pack("<I", 0)
+                    elif bin_prefix_type == 2:
+                        # Append 4 bytes of binary length (4) + 4 bytes of zero data
+                        body_bytes += struct.pack("<I", 4) + b"\x00\x00\x00\x00"
+                else:
+                    body_bytes = json_bytes
+                    
+                resp = Response(content=body_bytes, media_type="application/octet-stream" if use_len_prefix else "application/json")
+                return customize_headers(resp, "SUCCESS")
 
         else:
             # Acknowledge any other unhandled FK request with JSON (not plain text)
             # so the device does not retry indefinitely.
             logger.info(f"[FK PUSH] Unhandled req_code={req_code}, acknowledging with JSON ok")
-            resp = json.dumps({"ret": "ok", "result": True, "cloudtime": cloudtime})
-            return PlainTextResponse(resp, media_type="application/json",
-                                    headers=make_headers("SUCCESS"))
+            resp_data = {"ret": "ok", "result": True, "cloudtime": cloudtime}
+            return make_fk_response(resp_data)
             # --- FALLBACK: Standard ZKTeco ADMS Protocol ---
     # Unconditional debug log for standard push
     print(f"[CDATA HIT] ip={ip} SN={SN} table={table} method={request.method} body_len={len(body_text)} body_preview={body_text[:300]}")
@@ -677,24 +821,79 @@ async def receive_cdata(
         return "OK"
     if table == 'ATTLOG':
         log(f"Received ATTLOG from {SN}")
-        background_tasks.add_task(process_attendance_data, SN, body_text)
-        return "OK"
+        try:
+            process_attendance_data(SN, body_text)
+            return "OK"
+        except Exception as e:
+            logger.error(f"Failed to process ATTLOG for standard ADMS device {SN}: {e}")
+            raise HTTPException(status_code=500, detail=f"Database insertion failed: {e}")
     elif table == 'OPERLOG':
         return "OK"
 
-    logger.info(f"[PUSH] Device SN={SN} table={table} from {ip} â€” body length={len(body_text)}")
+    logger.info(f"[PUSH] Device SN={SN} table={table} from {ip} — body length={len(body_text)}")
     return "OK"
 
 
 # Root handler removed â€” PathNormalizerMiddleware rewrites // â†’ /iclock/cdata
 
 
+def parse_adms_info(sn: str, info_str: str):
+    """Parse ZK ADMS INFO registration string and store in MachineState."""
+    state = pull_manager._machines.get(sn)
+    if not state:
+        return
+    
+    try:
+        parts = info_str.split(',')
+        if len(parts) >= 5:
+            pf_fw = parts[0]
+            platform = pf_fw
+            firmware = "Unknown"
+            if "-Ver" in pf_fw:
+                p_parts = pf_fw.split("-Ver")
+                platform = p_parts[0]
+                firmware = p_parts[1]
+            elif "Ver" in pf_fw:
+                p_parts = pf_fw.split("Ver")
+                platform = p_parts[0]
+                firmware = p_parts[1]
+
+            users = int(parts[1])
+            fingers = int(parts[2])
+            records = int(parts[3])
+            ip = parts[4]
+
+            state.config["platform"] = platform
+            state.config["firmware"] = firmware
+            state.config["users"] = users
+            state.config["fingers"] = fingers
+            state.config["records"] = records
+            if ip and ip != "0.0.0.0":
+                state.ip = ip
+                state.config["ip"] = ip
+            
+            import machines_config
+            machines_config.save_machine(state.config)
+            logger.info(f"[ADMS INFO] Parsed for {sn}: Platform={platform}, FW={firmware}, Users={users}, Records={records}")
+    except Exception as e:
+        logger.error(f"[ADMS INFO] Failed to parse info string '{info_str}' for {sn}: {e}")
+
+
 @app.get("/iclock/getrequest", response_class=PlainTextResponse)
 async def get_request(request: Request, SN: Optional[str] = Query(None)):
     ip = request.client.host
     if SN:
+        state = pull_manager.get_machine(sn=SN)
+        if state and not state.get("enabled", True):
+            logger.warning(f"[ACCESS DENIED] getrequest from disabled machine SN={SN} rejected.")
+            return Response(content="DISABLED", status_code=403)
         register_push_device(SN, ip, fk_protocol=False)
         log(f"Device {SN} getrequest from {ip}")
+        
+        info_param = request.query_params.get("INFO")
+        if info_param:
+            parse_adms_info(SN, info_param)
+            
         if SN in COMMAND_QUEUE and COMMAND_QUEUE[SN]:
             cmd = COMMAND_QUEUE[SN].pop(0)
             log(f"Sending queued command to {SN}: {cmd}")
@@ -725,60 +924,73 @@ def get_app_data_dir():
 APP_DATA_DIR = get_app_data_dir()
 USERS_FILE = os.path.join(APP_DATA_DIR, "users.json")
 
-class UserRegister(BaseModel):
-    username: str
-    password: str
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    initialized = auth_helper.is_auth_initialized()
+    lockout = False
+    if not initialized and auth_helper.is_app_configured():
+        lockout = True
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        try:
-            if os.path.getsize(USERS_FILE) == 0: return {}
-            with open(USERS_FILE, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"[Auth] Error loading users.json: {e}")
-            return {}
-    return {}
+    logged_in = False
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        logged_in = auth_helper.validate_session(token)
+    return {
+        "initialized": initialized,
+        "lockout": lockout,
+        "logged_in": logged_in
+    }
 
-def save_users(users):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users, f, indent=4)
-
-@app.post("/api/auth/register")
-async def register(user: UserRegister):
-    users = load_users()
-    if user.username in users or user.username == ADMIN_USERNAME:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    
-    hashed_pass = pwd_context.hash(user.password)
-    users[user.username] = {"password": hashed_pass}
-    save_users(users)
-    logger.info(f"[Auth] New user registered: {user.username}")
-    return {"message": "User registered successfully"}
+@app.post("/api/auth/initialize")
+async def initialize_auth(body: InitializeIn):
+    if auth_helper.is_auth_initialized():
+        raise HTTPException(status_code=400, detail="Already initialized")
+    if auth_helper.is_app_configured():
+        raise HTTPException(
+            status_code=403,
+            detail="Security lockout: Existing configuration detected. Re-initialization of the master password is disabled to protect existing credentials. Wipe all data files in APPDATA\\UTAS to start fresh."
+        )
+    try:
+        success = auth_helper.initialize_master_password(body.password)
+        if success:
+            token = auth_helper.create_session()
+            return {"status": "success", "access_token": token}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to initialize password")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
 
 @app.post("/api/auth/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    username = form_data.username
-    password = form_data.password
+async def login(body: MasterLoginIn):
+    if not auth_helper.is_auth_initialized():
+        raise HTTPException(status_code=400, detail="Setup required: Password has not been initialized.")
     
-    # Check Admin
-    if username == ADMIN_USERNAME:
-        if verify_password(password, ADMIN_PASS_HASH):
-            access_token = create_access_token(data={"sub": username})
-            return {"access_token": access_token, "token_type": "bearer"}
-    
-    # Check Regular Users
-    users = load_users()
-    if username in users:
-        if verify_password(password, users[username]["password"]):
-            access_token = create_access_token(data={"sub": username})
-            return {"access_token": access_token, "token_type": "bearer"}
-            
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Incorrect username or password",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    if auth_helper.verify_master_password(body.password):
+        token = auth_helper.create_session()
+        return {"access_token": token, "token_type": "bearer"}
+    else:
+        raise HTTPException(status_code=401, detail="Invalid password.")
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        auth_helper.destroy_session(token)
+    return {"status": "success"}
+
+@app.post("/api/auth/change-password", dependencies=[Depends(get_current_user)])
+async def change_password(body: ChangePasswordIn):
+    try:
+        success = auth_helper.change_master_password(body.old_password, body.new_password)
+        if success:
+            return {"status": "success", "message": "Password changed successfully."}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to change password.")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
 
 @app.get("/api/admin/server/logs", dependencies=[Depends(get_current_user)])
 async def get_server_logs():
@@ -789,6 +1001,32 @@ async def get_server_status():
     return {
         "enabled": pull_manager.enabled,
         "scheduler_running": pull_manager._scheduler.running
+    }
+
+@app.get("/api/admin/server/info")
+async def get_server_info():
+    """
+    Returns the local IP address and port of this UTAS server so the 
+    Dashboard can display it for ZKTeco device configuration.
+    """
+    import socket
+    local_ip = "127.0.0.1"
+    try:
+        # Connect to a remote address to determine which local interface is used
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        try:
+            local_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            local_ip = "127.0.0.1"
+    return {
+        "local_ip": local_ip,
+        "port": SERVER_PORT,
+        "hostname": socket.gethostname(),
+        "server_url": f"http://{local_ip}:{SERVER_PORT}"
     }
 
 @app.get("/api/admin/health", dependencies=[Depends(get_current_user)])
@@ -954,7 +1192,10 @@ async def connect_and_check(body: dict):
             config["column2"] = find_best(att_cols, ["swap_time", "timestamp", "log_time", "checktime", "event_time"], config.get("column2", "swap_time"))
             config["column3"] = find_best(att_cols, ["machine_ref", "ip_address", "machine_sn", "sn", "device_id"], config.get("column3", "machine_ref"))
             # Optional PK and Sequence
-            config["column_pk"] = find_best(att_cols, ["HR_ATT_LOG_ID", "ID", "LOG_ID", "PK"], config.get("column_pk", "HR_ATT_LOG_ID"))
+            config["col_pk"] = find_best(att_cols, ["HR_ATT_LOG_ID", "ID", "LOG_ID", "PK"], config.get("col_pk", config.get("column_pk", "HR_ATT_LOG_ID")))
+            config["column_pk"] = config["col_pk"]  # maintain compatibility
+            if config["col_pk"].upper() == "HR_ATT_LOG_ID":
+                config["seq_pk"] = config.get("seq_pk", "HR_EMP_INOUT_ID_S")
 
         # Auto-map Machine columns
         if checks["machine_table_exists"]:
@@ -1051,7 +1292,12 @@ async def list_machines():
 @app.post("/pull/machines", dependencies=[Depends(get_current_user)])
 async def add_machine(machine: MachineIn):
     """Add a new machine (writes to machines.json)."""
-    result = pull_manager.add_machine(machine.model_dump())
+    data = machine.model_dump()
+    if data.get("port") == 5005 and data.get("driver") == "zk":
+        data["driver"] = "fk"
+    if "company_names" in data:
+        data["company_name"] = data["company_names"][0] if data["company_names"] else "None"
+    result = pull_manager.add_machine(data)
     return result
 
 
@@ -1059,46 +1305,142 @@ async def add_machine(machine: MachineIn):
 async def list_companies():
     """Return a list of unique company names registered in the system."""
     try:
-        db_type = db.get_active_db_type()
-        config_db = db.load_latest_config(db_type)
-        if db_type == "Oracle":
-            conn = db.connect_db_oracle(config_db)
-        else:
-            conn = db.connect_db_postgresql(config_db)
-        meta = db.get_machine_meta(conn, db_type=db_type)
-        conn.close()
-        # Extract unique company names
-        companies = sorted(list(set(m.get("company_name", "None") for m in meta.values())))
-        return {"success": True, "companies": companies}
+        # Load mappings keys
+        mappings = db.load_company_mappings()
+        companies = set(mappings.keys())
+        
+        # Also load companies from machines.json
+        machines = machines_config.load_machines()
+        for m in machines:
+            for c in m.get("company_names", []):
+                if c and c != "None":
+                    companies.add(c)
+            c_single = m.get("company_name", "None")
+            if c_single and c_single != "None":
+                companies.add(c_single)
+                
+        return {"success": True, "companies": sorted(list(companies))}
     except Exception as e:
         logger.error(f"[Admin] Failed to fetch companies: {e}")
-        return {"success": False, "error": str(e), "companies": ["None"]}
+        return {"success": False, "error": str(e), "companies": []}
+
+class CompanyAddIn(BaseModel):
+    company_name: str
+
+@app.post("/api/admin/companies/add", dependencies=[Depends(get_current_user)])
+async def add_company(body: CompanyAddIn):
+    """Add a new company name configuration."""
+    mappings = db.load_company_mappings()
+    if body.company_name in mappings:
+        return {"success": True, "message": "Company already exists"}
+    success = db.save_company_mapping(body.company_name, "")
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to add company")
+    return {"success": True}
+
+@app.delete("/api/admin/companies/{company_name}", dependencies=[Depends(get_current_user)])
+async def delete_company(company_name: str):
+    """Remove a company mapping."""
+    success = db.delete_company_mapping(company_name)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete company")
+    return {"success": True}
+
+class CompanyMapDbIn(BaseModel):
+    company_name: str
+    profile_name: str
+
+@app.post("/api/admin/companies/map-db", dependencies=[Depends(get_current_user)])
+async def map_company_to_db(body: CompanyMapDbIn):
+    """Map a company name to a named database profile."""
+    success = db.save_company_mapping(body.company_name, body.profile_name)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to map company to database")
+    return {"success": True}
+
+@app.get("/api/admin/companies/mappings", dependencies=[Depends(get_current_user)])
+async def get_company_mappings():
+    """Get all company to DB profile mappings."""
+    return db.load_company_mappings()
+
+@app.get("/api/admin/db-profiles", dependencies=[Depends(get_current_user)])
+async def list_db_profiles():
+    """Get all configured database profiles."""
+    return db.load_db_profiles()
+
+@app.post("/api/admin/db-profiles/test", dependencies=[Depends(get_current_user)])
+async def test_db_profile_connection(config: dict):
+    """Test connection settings for a database profile."""
+    try:
+        if config.get("database") == "Oracle":
+            conn = db.connect_db_oracle(config)
+            conn.close()
+        else:
+            conn = db.connect_db_postgresql(config)
+            conn.close()
+        return {"status": "success", "message": "Connection successful!"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/admin/db-profiles/{profile_name}", dependencies=[Depends(get_current_user)])
+async def save_db_profile(profile_name: str, config: dict):
+    """Save or update a database profile."""
+    success = db.save_db_profile(profile_name, config)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to save database profile")
+    return {"success": True}
+
+@app.delete("/api/admin/db-profiles/{profile_name}", dependencies=[Depends(get_current_user)])
+async def delete_db_profile(profile_name: str):
+    """Delete a database profile."""
+    success = db.delete_db_profile(profile_name)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete database profile")
+    return {"success": True}
+
+@app.post("/pull/machines/{sn}/toggle", dependencies=[Depends(get_current_user)])
+async def toggle_machine(sn: str):
+    """Toggle the enabled status of a machine."""
+    machine = machines_config.get_machine(sn=sn)
+    if not machine:
+        for m in machines_config.load_machines():
+            key = m.get("sn") or f"{m['ip']}:{m.get('port', 4370)}"
+            if key == sn:
+                machine = m
+                break
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    
+    enabled = not machine.get("enabled", True)
+    machine["enabled"] = enabled
+    machines_config.save_machine(machine)
+    pull_manager.reload()
+    return {"success": True, "enabled": enabled}
 
 @app.post("/api/admin/companies/map", dependencies=[Depends(get_current_user)])
 async def map_devices_to_company(body: CompanyMapIn):
     """Bulk link a list of Serial Numbers to a Company Name."""
     try:
-        db_type = db.get_active_db_type()
-        config_db = db.load_latest_config(db_type)
-        if db_type == "Oracle":
-            conn = db.connect_db_oracle(config_db)
-        else:
-            conn = db.connect_db_postgresql(config_db)
-        
         for sn in body.sns:
-            # 1. Update Database
-            state = pull_manager.get_machine(sn=sn)
-            ip = state.get("ip", "0.0.0.0") if state else "0.0.0.0"
-            
-            # Use current protocol or default to HTTP if SN mapping is happening
-            proto = state.get("protocol", "HTTP")
-            
-            db.upsert_machine_meta(conn, sn, ip, proto, body.company_name, db_type=db_type)
-            
-            # 2. Update In-Memory Engine
-            pull_manager.update_machine_metadata(sn, proto, body.company_name)
-            
-        conn.close()
+            machine = machines_config.get_machine(sn=sn)
+            if machine:
+                company_names = machine.get("company_names", [])
+                if not company_names:
+                    single_comp = machine.get("company_name", "None")
+                    if single_comp and single_comp != "None":
+                        company_names = [single_comp]
+                    else:
+                        company_names = []
+                
+                if body.company_name not in company_names:
+                    company_names.append(body.company_name)
+                
+                machine["company_names"] = company_names
+                if "company_name" in machine:
+                    del machine["company_name"]
+                machines_config.save_machine(machine)
+                
+        pull_manager.reload()
         return {"success": True, "message": f"Mapped {len(body.sns)} devices to {body.company_name}"}
     except Exception as e:
         logger.error(f"[Admin] Mapping failed: {e}")
@@ -1133,8 +1475,17 @@ async def reload_machines():
 @app.post("/pull/attendance/{sn}")
 def manual_pull(sn: str):
     state = pull_manager.get_machine(sn=sn)
-    driver = (state.get("driver") or "zk").lower() if state else "zk"
-    if state and state.get("protocol") == "HTTP":
+    if not state:
+        return {"success": False, "error": "Machine not found"}
+        
+    if not state.get("company_names"):
+        return {
+            "success": False,
+            "error": "Machine is not assigned to any company. Please assign a company first."
+        }
+        
+    driver = (state.get("driver") or "zk").lower()
+    if state.get("protocol") == "HTTP":
         # Queue command to fetch historical logs
         if sn not in COMMAND_QUEUE:
             COMMAND_QUEUE[sn] = []
@@ -1266,28 +1617,58 @@ async def dashboard_stats():
     record_count = 0
     if db:
         try:
-            config = db.load_latest_config("Oracle")
-            conn = db.connect_db_oracle(config)
-            cursor = conn.cursor()
-            table    = config["table"]
-            col_time = config["column2"]
-            cursor.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE TRUNC({col_time}) = TRUNC(SYSDATE)"
-            )
-            record_count = cursor.fetchone()[0]
-            cursor.close()
-            conn.close()
+            profiles = db.load_db_profiles()
+            seen_keys = set()
+            for name, config in profiles.items():
+                key = f"{config.get('host')}:{config.get('port')}:{config.get('dbname')}:{config.get('username')}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                
+                db_type = config.get("database", "Oracle")
+                try:
+                    if db_type == "Oracle":
+                        conn = db.connect_db_oracle(config)
+                        cursor = conn.cursor()
+                        table    = config["table"]
+                        col_time = config["column2"]
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE TRUNC({col_time}) = TRUNC(SYSDATE)"
+                        )
+                        record_count += cursor.fetchone()[0]
+                        cursor.close()
+                        conn.close()
+                    elif db_type == "PostgreSQL":
+                        conn = db.connect_db_postgresql(config)
+                        cursor = conn.cursor()
+                        table    = config["table"]
+                        col_time = config["column2"]
+                        cursor.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE DATE({col_time}) = CURRENT_DATE"
+                        )
+                        record_count += cursor.fetchone()[0]
+                        cursor.close()
+                        conn.close()
+                except Exception as db_err:
+                    logger.error(f"Stats query failed for profile {name}: {db_err}")
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
 
     # Get unique companies count
     comp_count = 0
     try:
-        config_db = db.load_latest_config("Oracle")
-        conn = db.connect_db_oracle(config_db)
-        meta = db.get_machine_meta(conn)
-        conn.close()
-        comp_count = len(set(m.get("company_name", "None") for m in meta.values()))
+        mappings = db.load_company_mappings()
+        companies = set(mappings.keys())
+        
+        machines_list = machines_config.load_machines()
+        for m in machines_list:
+            for c in m.get("company_names", []):
+                if c and c != "None":
+                    companies.add(c)
+            c_single = m.get("company_name", "None")
+            if c_single and c_single != "None":
+                companies.add(c_single)
+        comp_count = len(companies)
     except: pass
 
     return {
@@ -1302,6 +1683,24 @@ async def dashboard_stats():
 
 # â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if __name__ == "__main__":
+    import sys
     import uvicorn
+    
+    # Check for --reset-password switch
+    if len(sys.argv) > 1 and sys.argv[1] == "--reset-password":
+        try:
+            import auth_helper
+            print("[*] Performing administrative password reset...")
+            if auth_helper.administrative_reset():
+                print("[SUCCESS] Password configuration and lockout flags have been successfully reset.")
+                print("You can now set a new password on the next application launch.")
+                sys.exit(0)
+            else:
+                print("[ERROR] Failed to perform administrative password reset.")
+                sys.exit(1)
+        except Exception as err:
+            print(f"[ERROR] Error during reset: {err}")
+            sys.exit(1)
+
     log(f"[*] Starting UTAS Server on 0.0.0.0:{SERVER_PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT, http="h11", server_header=False, date_header=False)

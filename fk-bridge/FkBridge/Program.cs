@@ -1,4 +1,4 @@
-﻿using FkBridge;
+using FkBridge;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<FkBridgeOptions>(builder.Configuration.GetSection("FkBridge"));
@@ -17,6 +17,10 @@ app.MapPost("/connect", (DeviceRequest req, FkDeviceService svc) =>
     if (string.IsNullOrWhiteSpace(req.Ip))
         return Results.BadRequest(new { success = false, error = "ip required" });
     var (ok, handle, error) = svc.Connect(req);
+    if (ok)
+    {
+        FkAttendNative.FK_DisConnect(handle);
+    }
     return Results.Json(new { success = ok, handle, error });
 });
 

@@ -436,3 +436,107 @@ body {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #CBD5E0; border-radius: 3px; }
+
+/* ── Server Info Banner (Dashboard) ───────────────────────────────────────── */
+.server-info-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: linear-gradient(135deg, #1c2b59 0%, #2a3f80 60%, #3b5296 100%);
+  border-radius: var(--radius-lg);
+  padding: 14px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 20px rgba(28, 43, 89, 0.25);
+  flex-wrap: wrap;
+}
+
+.server-info-icon {
+  color: #7faaff;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.server-info-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.server-info-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.55);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 7px;
+}
+
+.server-info-fields {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.server-info-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 5px 10px;
+  transition: background .15s;
+}
+
+.server-info-chip:hover {
+  background: rgba(255,255,255,0.16);
+}
+
+.chip-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.45);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chip-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  font-family: 'Roboto Mono', 'Consolas', monospace;
+}
+
+.chip-url .chip-value {
+  font-size: 12px;
+  color: #a8c4ff;
+}
+
+.chip-copy {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: rgba(255,255,255,0.5);
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 3px;
+  transition: color .15s, background .15s;
+}
+
+.chip-copy:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.12);
+}
+
+.server-info-hint {
+  font-size: 11px;
+  color: rgba(255,255,255,0.40);
+  white-space: nowrap;
+  align-self: center;
+  flex-shrink: 0;
+  font-style: italic;
+}
+

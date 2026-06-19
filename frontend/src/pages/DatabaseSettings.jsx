@@ -1,471 +1,644 @@
 import React, { useState, useEffect } from 'react'
 import {
   MdStorage, MdLink, MdCheckCircle, MdError, MdWarning,
-  MdAdd, MdSettings, MdLock, MdTableChart, MdDevices
+  MdAdd, MdSettings, MdDelete, MdEdit, MdTableChart, MdRefresh, MdOutlineDataSaverOn
 } from 'react-icons/md'
-import { connectAndCheck, createAttendanceTable, createMachineTable, getDbConfig } from '../api/client'
+import {
+  getDbProfiles,
+  saveDbProfile,
+  deleteDbProfile,
+  testDbProfileConnection,
+  createAttendanceTable
+} from '../api/client'
 import toast from 'react-hot-toast'
 
-/* ─── small helpers ─────────────────────────────────────── */
+/* ─── Field component ─── */
 const Field = ({ label, name, value, onChange, placeholder = '', type = 'text' }) => (
-  <div className="dw-field">
+  <div className="profile-field">
     <label>{label}</label>
     <input type={type} name={name} value={value} onChange={onChange} placeholder={placeholder} />
   </div>
 )
 
-const StatusPill = ({ ok, label }) => (
-  <span className={`dw-pill ${ok ? 'dw-pill-ok' : 'dw-pill-miss'}`}>
-    {ok ? <MdCheckCircle /> : <MdWarning />} {label}
-  </span>
-)
-
-const SectionCard = ({ num, title, icon, locked, children }) => (
-  <div className={`dw-section ${locked ? 'dw-locked' : ''}`}>
-    <div className="dw-section-head">
-      <span className="dw-num">{num}</span>
-      {icon}
-      <h2>{title}</h2>
-      {locked && <span className="dw-lock-badge"><MdLock /> Locked</span>}
-    </div>
-    {!locked && <div className="dw-section-body">{children}</div>}
-  </div>
-)
-
-/* ─── defaults ──────────────────────────────────────────── */
-const defaultCreds = {
-  database: 'Oracle', host: '', port: '1521',
-  username: '', password: '', dbname: ''
-}
-const defaultAttCols = {
-  table: 'HR_EMP_INOUT_DETAIL', col_pk: 'HR_ATT_LOG_ID',
-  seq_pk: 'HR_EMP_INOUT_ID_S', column1: 'EMPLOYEE_NO',
-  column2: 'SWAP_TIME', column3: 'MACHINE_REF', column4: ''
-}
-const defaultMachCols = {
-  machine_table: 'COMP_MACHINE', col_sn: 'SN',
-  col_ip: 'IP', col_proto: 'PROTOCOL', col_company: 'COMPANY_NAME'
+const defaultProfile = {
+  database: 'Oracle',
+  host: '',
+  port: '1521',
+  username: '',
+  password: '',
+  dbname: '',
+  table: 'HR_EMP_INOUT_DETAIL',
+  column1: 'EMPLOYEE_NO',
+  column2: 'SWAP_TIME',
+  column3: 'MACHINE_REF',
+  col_pk: 'HR_ATT_LOG_ID',
+  seq_pk: 'HR_EMP_INOUT_ID_S'
 }
 
 export default function DatabaseSettings() {
-  const [creds, setCreds]       = useState(defaultCreds)
-  const [attCols, setAttCols]   = useState(defaultAttCols)
-  const [machCols, setMachCols] = useState(defaultMachCols)
-
-  /* wizard state */
-  const [connStatus, setConnStatus] = useState(null)   // null | 'ok' | 'error'
-  const [connMsg, setConnMsg]       = useState('')
-  const [attExists, setAttExists]   = useState(false)
-  const [machExists, setMachExists] = useState(false)
-  const [bothExist, setBothExist]   = useState(false)
-
-  const [wantCreateAtt,  setWantCreateAtt]  = useState(false)
-  const [wantCreateMach, setWantCreateMach] = useState(false)
-
+  const [profiles, setProfiles] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [selectedProfile, setSelectedProfile] = useState(null) // profile name being edited/added
+  const [form, setForm] = useState(defaultProfile)
+  const [profileName, setProfileName] = useState('') // Custom key name
+  const [isEditMode, setIsEditMode] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [attCreated,  setAttCreated]  = useState(false)
-  const [machCreated, setMachCreated] = useState(false)
+  const [testStatus, setTestStatus] = useState(null) // { success: boolean, msg: string }
+  const [confirmModal, setConfirmModal] = useState(null)
 
-  /* load saved config on mount */
+  const resetFocus = () => {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
+  }
+
   useEffect(() => {
-    getDbConfig().then(r => {
-      const d = r.data
-      if (d) {
-        setCreds(prev => ({ ...prev, ...d }))
-        if (d.table)          setAttCols(prev  => ({ ...prev,  table:         d.table,
-          col_pk: d.col_pk||prev.col_pk, seq_pk: d.seq_pk||prev.seq_pk,
-          column1: d.column1||prev.column1, column2: d.column2||prev.column2,
-          column3: d.column3||prev.column3, column4: d.column4||'' }))
-        if (d.machine_table)  setMachCols(prev => ({ ...prev, machine_table: d.machine_table }))
-      }
-    }).catch(() => {})
+    fetchProfiles()
   }, [])
 
-  const loadConfigForType = (dbType) => {
-    getDbConfig(dbType).then(r => {
-      const d = r.data
-      if (d) {
-        setCreds(prev => ({ ...prev, ...d }))
-        if (d.table) {
-          setAttCols(prev => ({
-            ...prev,
-            table: d.table,
-            col_pk: d.col_pk || prev.col_pk,
-            seq_pk: d.seq_pk || prev.seq_pk,
-            column1: d.column1 || prev.column1,
-            column2: d.column2 || prev.column2,
-            column3: d.column3 || prev.column3,
-            column4: d.column4 || ''
-          }))
-        }
-        if (d.machine_table) {
-          setMachCols(prev => ({ ...prev, machine_table: d.machine_table }))
-        }
-      } else {
-        setCreds({
-          database: dbType,
-          host: '',
-          port: dbType === 'Oracle' ? '1521' : '5432',
-          username: '',
-          password: '',
-          dbname: ''
-        })
+  const fetchProfiles = async () => {
+    setLoading(true)
+    try {
+      const res = await getDbProfiles()
+      setProfiles(res.data || {})
+    } catch (e) {
+      toast.error('Failed to load database profiles')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSelectProfile = (name) => {
+    setSelectedProfile(name)
+    setProfileName(name)
+    setForm({ ...defaultProfile, ...profiles[name] })
+    setIsEditMode(true)
+    setTestStatus(null)
+  }
+
+  const handleAddNew = () => {
+    setSelectedProfile('_new')
+    setProfileName('')
+    setForm(defaultProfile)
+    setIsEditMode(false)
+    setTestStatus(null)
+  }
+
+  const handleFormChange = (e) => {
+    const { name, value } = e.target
+    setForm(prev => {
+      const updated = { ...prev, [name]: value }
+      // Auto-change port when database type switches
+      if (name === 'database') {
+        updated.port = value === 'Oracle' ? '1521' : '5432'
       }
-    }).catch(() => {
-      setCreds({
-        database: dbType,
-        host: '',
-        port: dbType === 'Oracle' ? '1521' : '5432',
-        username: '',
-        password: '',
-        dbname: ''
-      })
+      return updated
     })
   }
 
-  const handleCreds = e => {
-    const { name, value } = e.target
-    setCreds(p => ({ ...p, [name]: value }))
-    if (name === 'database') {
-      loadConfigForType(value)
-    }
-  }
-  const handleAtt    = e => setAttCols(p => ({ ...p, [e.target.name]: e.target.value }))
-  const handleMach   = e => setMachCols(p => ({ ...p, [e.target.name]: e.target.value }))
-
-  /* ── Step 1: Connect & check ── */
-  const handleConnect = async () => {
-    if (!creds.host || !creds.username || !creds.password || !creds.dbname) {
-      toast.error('Fill all credential fields first.'); return
+  const handleTestConnection = async () => {
+    if (!form.host || !form.username || !form.password || !form.dbname) {
+      toast.error('Please fill in the server details first')
+      return
     }
     setBusy(true)
+    setTestStatus(null)
     try {
-      const payload = {
-        config: { ...creds, ...attCols, machine_table: machCols.machine_table },
-        att_table:     attCols.table,
-        machine_table: machCols.machine_table
-      }
-      const res = await connectAndCheck(payload)
-      const d   = res.data
-      if (d.status === 'error') {
-        setConnStatus('error'); setConnMsg(d.message)
-        toast.error('Connection failed')
+      const res = await testDbProfileConnection(form)
+      if (res.data.status === 'success') {
+        setTestStatus({ success: true, msg: 'Connection successful!' })
+        toast.success('Database connection verified!')
       } else {
-        // Apply auto-mapped config from backend
-        if (d.detected_config) {
-          const cfg = d.detected_config
-          setCreds(prev => ({ ...prev, host: cfg.host, port: cfg.port, username: cfg.username, password: cfg.password, dbname: cfg.dbname }))
-          setAttCols(prev => ({
-            ...prev,
-            table:   cfg.table   || prev.table,
-            column1: cfg.column1 || prev.column1,
-            column2: cfg.column2 || prev.column2,
-            column3: cfg.column3 || prev.column3,
-            column_pk: cfg.column_pk || prev.column_pk,
-            sequence:  cfg.sequence  || prev.sequence,
-          }))
-          setMachCols(prev => ({
-            ...prev,
-            machine_table: cfg.machine_table || prev.machine_table,
-            col_sn:        cfg.col_sn        || prev.col_sn,
-            col_ip:        cfg.col_ip        || prev.col_ip,
-            col_proto:     cfg.col_proto     || prev.col_proto,
-            col_company:   cfg.col_company   || prev.col_company,
-          }))
-        }
-        setConnStatus('ok'); setConnMsg(d.message)
-        setAttExists(d.att_table_exists)
-        setMachExists(d.machine_table_exists)
-        setBothExist(d.both_exist)
-        if (d.both_exist) toast.success('Both tables found — config saved!')
-        else toast.success('Connected! Configure missing tables below.')
+        setTestStatus({ success: false, msg: res.data.message })
+        toast.error('Connection failed')
       }
     } catch (e) {
-      setConnStatus('error'); setConnMsg(String(e))
-      toast.error('Connection error')
-    } finally { setBusy(false) }
+      setTestStatus({ success: false, msg: String(e) })
+      toast.error('Connection failed')
+    } finally {
+      setBusy(false)
+    }
   }
 
-  /* ── Step 3: Create attendance table ── */
-  const handleCreateAtt = async () => {
+  const handleCreateTable = async () => {
     setBusy(true)
     try {
-      const payload = { config: { ...creds, ...attCols } }
+      const payload = { config: form }
       const res = await createAttendanceTable(payload)
-      const d   = res.data
-      if (d.status === 'success') { setAttCreated(true); toast.success(d.message) }
-      else toast.error(d.message)
-    } catch (e) { toast.error(String(e)) }
-    finally { setBusy(false) }
+      if (res.data.status === 'success') {
+        toast.success(res.data.message || 'Table created successfully!')
+      } else {
+        toast.error(res.data.message || 'Failed to create table')
+      }
+    } catch (e) {
+      toast.error(String(e))
+    } finally {
+      setBusy(false)
+    }
   }
 
-  /* ── Step 5: Create machine table ── */
-  const handleCreateMach = async () => {
+  const handleSave = async () => {
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
+    const nameKey = profileName.trim()
+    if (!nameKey) {
+      toast.error('Please enter a profile name')
+      return
+    }
+    if (!form.host || !form.username || !form.dbname) {
+      toast.error('Please fill in required database parameters')
+      return
+    }
     setBusy(true)
     try {
-      const payload = { config: { ...creds }, ...machCols }
-      const res = await createMachineTable(payload)
-      const d   = res.data
-      if (d.status === 'success') { setMachCreated(true); toast.success(d.message) }
-      else toast.error(d.message)
-    } catch (e) { toast.error(String(e)) }
-    finally { setBusy(false) }
+      const res = await saveDbProfile(nameKey, form)
+      if (res.data.success) {
+        toast.success(`Profile "${nameKey}" saved successfully!`)
+        fetchProfiles()
+        setSelectedProfile(null)
+      } else {
+        toast.error('Failed to save profile')
+      }
+    } catch (e) {
+      toast.error(String(e))
+    } finally {
+      setBusy(false)
+    }
   }
 
-  const attUnlocked  = connStatus === 'ok' && !attExists  && !bothExist
-  const machUnlocked = connStatus === 'ok' && !machExists && !bothExist
+  const handleDelete = (name) => {
+    resetFocus()
+    setConfirmModal({
+      title: 'Delete Database Profile',
+      message: `Are you sure you want to delete profile "${name}"? This action cannot be undone.`,
+      isDanger: true,
+      onConfirm: async () => {
+        resetFocus()
+        try {
+          const res = await deleteDbProfile(name)
+          if (res.data.success) {
+            toast.success(`Profile "${name}" deleted`)
+            if (selectedProfile === name) {
+              setSelectedProfile(null)
+            }
+            fetchProfiles()
+          } else {
+            toast.error('Failed to delete profile')
+          }
+        } catch (e) {
+          toast.error(String(e))
+        }
+      }
+    })
+  }
 
   return (
-    <div className="dw-wrap">
-      <div className="dw-header">
-        <MdStorage className="dw-header-icon" />
+    <div className="profile-wrap">
+      <div className="profile-header">
+        <MdStorage className="profile-header-icon" />
         <div>
-          <h1>Database Management</h1>
-          <p>Configure your external attendance database step by step</p>
+          <h1>Database Profile Settings</h1>
+          <p>Create and manage named database profiles to route attendance logs for your companies.</p>
         </div>
       </div>
 
-      {bothExist && (
-        <div className="dw-banner dw-banner-ok">
-          <MdCheckCircle /> Both tables are present — configuration saved. Nothing else to do!
+      <div className="profile-container">
+        {/* Left Side: Profiles List */}
+        <div className="profile-sidebar">
+          <div className="sidebar-header">
+            <h3>Active Profiles</h3>
+            <button className="btn btn-primary btn-sm" onClick={handleAddNew}>
+              <MdAdd /> New Profile
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="loading-state">
+              <MdRefresh className="anim-spin" /> Loading Profiles...
+            </div>
+          ) : Object.keys(profiles).length === 0 ? (
+            <div className="empty-state">
+              <MdWarning />
+              <p>No profiles configured yet. Click "New Profile" to get started.</p>
+            </div>
+          ) : (
+            <div className="profile-list">
+              {Object.keys(profiles).map(name => {
+                const p = profiles[name]
+                return (
+                  <div
+                    key={name}
+                    className={`profile-item-card ${selectedProfile === name ? 'active' : ''}`}
+                    onClick={() => handleSelectProfile(name)}
+                  >
+                    <div className="item-info">
+                      <h4>{name}</h4>
+                      <span>
+                        {p.database} | {p.host}:{p.port}
+                      </span>
+                    </div>
+                    <div className="item-actions">
+                      <button
+                        className="btn-icon btn-delete"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          handleDelete(name)
+                        }}
+                      >
+                        <MdDelete />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Right Side: Add/Edit Form */}
+        <div className="profile-main">
+          {selectedProfile ? (
+            <div className="profile-card">
+              <div className="card-header">
+                <h2>{isEditMode ? `Edit Profile: ${profileName}` : 'Create New DB Profile'}</h2>
+              </div>
+
+              <div className="card-body">
+                {/* Profile Name input */}
+                <div className="dw-grid-2">
+                  <div className="profile-field full-width">
+                    <label>Profile Identifier (Name)</label>
+                    <input
+                      type="text"
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      placeholder="e.g. Oracle Primary, Staging Postgres"
+                      disabled={isEditMode}
+                    />
+                  </div>
+                </div>
+
+                <h3 className="section-subtitle">1. Connection Credentials</h3>
+                <div className="dw-grid-2">
+                  <div className="profile-field">
+                    <label>Database Type</label>
+                    <select name="database" value={form.database} onChange={handleFormChange}>
+                      <option value="Oracle">Oracle</option>
+                      <option value="PostgreSQL">PostgreSQL</option>
+                    </select>
+                  </div>
+                  <Field label="Host / IP" name="host" value={form.host} onChange={handleFormChange} placeholder="127.0.0.1" />
+                  <Field label="Port" name="port" value={form.port} onChange={handleFormChange} placeholder="1521" />
+                  <Field label="Username" name="username" value={form.username} onChange={handleFormChange} placeholder="HR" />
+                  <Field label="Password" name="password" value={form.password} onChange={handleFormChange} type="password" />
+                  <Field label="Service / Database Name" name="dbname" value={form.dbname} onChange={handleFormChange} placeholder="orcl" />
+                </div>
+
+                <h3 className="section-subtitle">2. Attendance Table & Schema Mapping</h3>
+                <div className="dw-grid-2">
+                  <Field label="Table Name" name="table" value={form.table} onChange={handleFormChange} placeholder="HR_EMP_INOUT_DETAIL" />
+                  <Field label="Employee ID Column" name="column1" value={form.column1} onChange={handleFormChange} placeholder="EMPLOYEE_NO" />
+                  <Field label="Timestamp Column" name="column2" value={form.column2} onChange={handleFormChange} placeholder="SWAP_TIME" />
+                  <Field label="Machine Reference Column" name="column3" value={form.column3} onChange={handleFormChange} placeholder="MACHINE_REF" />
+                </div>
+
+                {form.database === 'Oracle' && (
+                  <>
+                    <h3 className="section-subtitle">3. Oracle Sequence Settings</h3>
+                    <div className="dw-grid-2">
+                      <Field label="Primary Key Column" name="col_pk" value={form.col_pk || ''} onChange={handleFormChange} placeholder="HR_ATT_LOG_ID" />
+                      <Field label="Sequence Name" name="seq_pk" value={form.seq_pk || ''} onChange={handleFormChange} placeholder="HR_EMP_INOUT_ID_S" />
+                    </div>
+                  </>
+                )}
+
+                {/* Schema preview */}
+                <div className="profile-schema">
+                  <span className="schema-title">Target Schema Preview (If created by UTAS)</span>
+                  <div className="schema-rows">
+                    {form.database === 'Oracle' && (
+                      <div className="schema-row">
+                        <span className="col-name">{form.col_pk || 'id'}</span>
+                        <span className="col-type">
+                          {form.col_pk ? `NUMBER — Primary Key (Sequence: ${form.seq_pk || 'None'})` : 'NUMBER — Auto-generated Primary Key'}
+                        </span>
+                      </div>
+                    )}
+                    {form.database === 'PostgreSQL' && (
+                      <div className="schema-row">
+                        <span className="col-name">id</span>
+                        <span className="col-type">SERIAL — Auto-generated Primary Key</span>
+                      </div>
+                    )}
+                    <div className="schema-row">
+                      <span className="col-name">{form.column1 || 'employee_no'}</span>
+                      <span className="col-type">VARCHAR(50)</span>
+                    </div>
+                    <div className="schema-row">
+                      <span className="col-name">{form.column2 || 'swap_time'}</span>
+                      <span className="col-type">TIMESTAMP</span>
+                    </div>
+                    <div className="schema-row">
+                      <span className="col-name">{form.column3 || 'machine_ref'}</span>
+                      <span className="col-type">VARCHAR(200)</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Test Connection Results */}
+                {testStatus !== null && (
+                  <div className={`test-status-banner ${testStatus.success ? 'success' : 'error'}`}>
+                    {testStatus.success ? (
+                      <>
+                        <MdCheckCircle /> {testStatus.msg}
+                      </>
+                    ) : (
+                      <>
+                        <MdError /> Error: {testStatus.msg}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                <div className="form-actions">
+                  <button className="btn btn-secondary" onClick={handleTestConnection} disabled={busy}>
+                    <MdLink /> Test Connection
+                  </button>
+                  <button className="btn btn-accent" onClick={handleCreateTable} disabled={busy}>
+                    <MdTableChart /> Create Table
+                  </button>
+                  <div className="spacer" />
+                  <button className="btn btn-ghost" onClick={() => {
+                    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+                      document.activeElement.blur();
+                    }
+                    setSelectedProfile(null);
+                  }}>
+                    Cancel
+                  </button>
+                  <button className="btn btn-primary" onClick={handleSave} disabled={busy}>
+                    <MdOutlineDataSaverOn /> Save Profile
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="form-empty-state">
+              <MdSettings />
+              <h3>Select a profile or create a new one</h3>
+              <p>Configure individual database destinations. Each company can be routed to a separate database profile.</p>
+              <button className="btn btn-primary" onClick={handleAddNew}>
+                <MdAdd /> Add Profile Now
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Confirm Dialog Modal */}
+      {confirmModal && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: '400px' }}>
+            <h2>{confirmModal.title || 'Confirm Action'}</h2>
+            <p style={{ margin: '15px 0', color: 'var(--color-text-muted)', fontSize: '14px', lineHeight: '1.5' }}>{confirmModal.message}</p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => { resetFocus(); setConfirmModal(null); }}>Cancel</button>
+              <button className={confirmModal.isDanger ? "btn btn-danger" : "btn btn-primary"} onClick={() => {
+                resetFocus();
+                confirmModal.onConfirm();
+                setConfirmModal(null);
+              }}>Confirm</button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* ══════════════ SECTION 1 ══════════════ */}
-      <SectionCard num="1" title="Database Credentials" icon={<MdLink />} locked={false}>
-        <p className="dw-hint">Enter connection details and click <strong>Connect & Check Tables</strong>.</p>
-
-        <div className="dw-grid-2">
-          <div className="dw-field">
-            <label>Database Type</label>
-            <select name="database" value={creds.database} onChange={handleCreds}>
-              <option value="Oracle">Oracle</option>
-              <option value="PostgreSQL">PostgreSQL</option>
-            </select>
-          </div>
-          <Field label="Host / IP" name="host" value={creds.host} onChange={handleCreds} placeholder="192.168.1.100" />
-          <Field label="Port" name="port" value={creds.port} onChange={handleCreds} placeholder="1521" />
-          <Field label="Username" name="username" value={creds.username} onChange={handleCreds} />
-          <Field label="Password" name="password" value={creds.password} onChange={handleCreds} type="password" />
-          <Field label="DB / Service Name" name="dbname" value={creds.dbname} onChange={handleCreds} placeholder="orcl" />
-        </div>
-
-        <div className="dw-action-row">
-          <button className="dw-btn dw-btn-primary" onClick={handleConnect} disabled={busy}>
-            {busy ? <><span className="spinner" /> Connecting…</> : <><MdLink /> Connect &amp; Check Tables</>}
-          </button>
-
-          {connStatus === 'ok' && (
-            <div className="dw-check-results">
-              <StatusPill ok={attExists}  label={`Attendance table: ${attCols.table}`} />
-              <StatusPill ok={machExists} label={`Machine table: ${machCols.machine_table}`} />
-            </div>
-          )}
-          {connStatus === 'error' && (
-            <div className="dw-err-msg"><MdError /> {connMsg}</div>
-          )}
-        </div>
-      </SectionCard>
-
-      {/* ══════════════ SECTION 2 ══════════════ */}
-      <SectionCard num="2" title="Attendance Log Table — Name & Columns" icon={<MdTableChart />} locked={!attUnlocked && !attExists}>
-        <p className="dw-hint">Specify the exact table and column names used in your database.</p>
-        <div className="dw-grid-2">
-          <Field label="Table Name" name="table" value={attCols.table} onChange={handleAtt} placeholder="HR_EMP_INOUT_DETAIL" />
-          <Field label="User / Employee Column" name="column1" value={attCols.column1} onChange={handleAtt} placeholder="EMPLOYEE_NO" />
-          <Field label="Timestamp Column" name="column2" value={attCols.column2} onChange={handleAtt} placeholder="SWAP_TIME" />
-          <Field label="Machine Ref Column" name="column3" value={attCols.column3} onChange={handleAtt} placeholder="MACHINE_REF" />
-          <Field label="Client ID Column (optional)" name="column4" value={attCols.column4} onChange={handleAtt} placeholder="CLIENT_ID" />
-          {creds.database === 'Oracle' && <>
-            <Field label="Primary Key Column" name="col_pk" value={attCols.col_pk} onChange={handleAtt} placeholder="HR_ATT_LOG_ID" />
-            <Field label="Sequence Name" name="seq_pk" value={attCols.seq_pk} onChange={handleAtt} placeholder="HR_EMP_INOUT_ID_S" />
-          </>}
-        </div>
-
-        {/* Schema preview */}
-        <div className="dw-schema">
-          <span className="dw-schema-title">Schema preview</span>
-          <div className="dw-schema-rows">
-            {creds.database === 'Oracle' && <div className="dw-schema-row"><span className="dw-col-name">{attCols.col_pk||'PK'}</span><span className="dw-col-type">NUMBER — Primary Key</span></div>}
-            {creds.database === 'PostgreSQL' && <div className="dw-schema-row"><span className="dw-col-name">id</span><span className="dw-col-type">SERIAL — Primary Key</span></div>}
-            <div className="dw-schema-row"><span className="dw-col-name">{attCols.column1||'col1'}</span><span className="dw-col-type">VARCHAR(50)</span></div>
-            <div className="dw-schema-row"><span className="dw-col-name">{attCols.column2||'col2'}</span><span className="dw-col-type">TIMESTAMP</span></div>
-            <div className="dw-schema-row"><span className="dw-col-name">{attCols.column3||'col3'}</span><span className="dw-col-type">VARCHAR(200)</span></div>
-            {attCols.column4 && <div className="dw-schema-row"><span className="dw-col-name">{attCols.column4}</span><span className="dw-col-type">VARCHAR(100)</span></div>}
-          </div>
-        </div>
-
-        {attExists && (
-          <div className="dw-action-row" style={{ marginTop: '1rem', justifyContent: 'flex-end' }}>
-            <button className="dw-btn dw-btn-ghost" onClick={handleConnect} disabled={busy}>
-              <MdSettings /> Save Updated Mapping
-            </button>
-          </div>
-        )}
-      </SectionCard>
-
-      {/* ══════════════ SECTION 3 ══════════════ */}
-      <SectionCard num="3" title="Create Attendance Log Table" icon={<MdAdd />} locked={!attUnlocked}>
-        {attCreated
-          ? <div className="dw-banner dw-banner-ok"><MdCheckCircle /> Table <strong>{attCols.table}</strong> created successfully!</div>
-          : <>
-              <label className="dw-checkbox-row">
-                <input type="checkbox" checked={wantCreateAtt} onChange={e => setWantCreateAtt(e.target.checked)} />
-                <span>I don't have a log table — create it for me with the columns above</span>
-              </label>
-              {wantCreateAtt && (
-                <div className="dw-action-row" style={{ marginTop: '1rem' }}>
-                  <button className="dw-btn dw-btn-success" onClick={handleCreateAtt} disabled={busy}>
-                    {busy ? <><span className="spinner" /> Creating…</> : <><MdAdd /> Create Attendance Table</>}
-                  </button>
-                </div>
-              )}
-            </>}
-      </SectionCard>
-
-      {/* ══════════════ SECTION 4 ══════════════ */}
-      <SectionCard num="4" title="Machine Link Table — Name & Columns" icon={<MdDevices />} locked={!machUnlocked && !machExists}>
-        <p className="dw-hint">This table links each device serial number to a company. Specify names used in your database.</p>
-        <div className="dw-grid-2">
-          <Field label="Table Name" name="machine_table" value={machCols.machine_table} onChange={handleMach} placeholder="COMP_MACHINE" />
-          <Field label="Serial Number Column" name="col_sn" value={machCols.col_sn} onChange={handleMach} placeholder="SN" />
-          <Field label="IP Address Column" name="col_ip" value={machCols.col_ip} onChange={handleMach} placeholder="IP" />
-          <Field label="Protocol Column" name="col_proto" value={machCols.col_proto} onChange={handleMach} placeholder="PROTOCOL" />
-          <Field label="Company Name Column" name="col_company" value={machCols.col_company} onChange={handleMach} placeholder="COMPANY_NAME" />
-        </div>
-
-        <div className="dw-schema">
-          <span className="dw-schema-title">Schema preview</span>
-          <div className="dw-schema-rows">
-            <div className="dw-schema-row"><span className="dw-col-name">{machCols.col_sn||'SN'}</span><span className="dw-col-type">VARCHAR(100) — Primary Key</span></div>
-            <div className="dw-schema-row"><span className="dw-col-name">{machCols.col_ip||'IP'}</span><span className="dw-col-type">VARCHAR(50)</span></div>
-            <div className="dw-schema-row"><span className="dw-col-name">{machCols.col_proto||'PROTOCOL'}</span><span className="dw-col-type">VARCHAR(20)</span></div>
-            <div className="dw-schema-row"><span className="dw-col-name">{machCols.col_company||'COMPANY_NAME'}</span><span className="dw-col-type">VARCHAR(200)</span></div>
-          </div>
-        </div>
-      </SectionCard>
-
-      {/* ══════════════ SECTION 5 ══════════════ */}
-      <SectionCard num="5" title="Create Machine Link Table" icon={<MdAdd />} locked={!machUnlocked}>
-        {machCreated
-          ? <div className="dw-banner dw-banner-ok"><MdCheckCircle /> Table <strong>{machCols.machine_table}</strong> created successfully!</div>
-          : <>
-              <label className="dw-checkbox-row">
-                <input type="checkbox" checked={wantCreateMach} onChange={e => setWantCreateMach(e.target.checked)} />
-                <span>I don't have a machine link table — create it for me with the columns above</span>
-              </label>
-              {wantCreateMach && (
-                <div className="dw-action-row" style={{ marginTop: '1rem' }}>
-                  <button className="dw-btn dw-btn-success" onClick={handleCreateMach} disabled={busy}>
-                    {busy ? <><span className="spinner" /> Creating…</> : <><MdAdd /> Create Machine Link Table</>}
-                  </button>
-                </div>
-              )}
-            </>}
-      </SectionCard>
-
       <style>{`
-        .dw-wrap { padding: 1.5rem 2rem; max-width: 860px; margin: 0 auto; }
+        .profile-wrap { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+        .profile-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; }
+        .profile-header-icon { font-size: 2.8rem; color: var(--color-accent); }
+        .profile-header h1 { font-size: 1.75rem; font-weight: 800; color: var(--color-text); }
+        .profile-header p { color: var(--color-text-muted); font-size: 0.95rem; margin-top: 4px; }
 
-        .dw-header { display:flex; align-items:center; gap:1rem; margin-bottom:1.75rem; }
-        .dw-header-icon { font-size:2.4rem; color:var(--color-accent); }
-        .dw-header h1 { font-size:1.5rem; font-weight:800; color:var(--color-text); }
-        .dw-header p  { color:var(--color-text-muted); font-size:.875rem; margin-top:2px; }
+        .profile-container { display: grid; grid-template-columns: 320px 1fr; gap: 2rem; }
 
-        .dw-banner { display:flex; align-items:center; gap:.5rem; padding:.85rem 1.2rem;
-          border-radius:var(--radius-md); font-weight:600; font-size:.875rem; margin-bottom:1.25rem; }
-        .dw-banner svg { font-size:1.25rem; }
-        .dw-banner-ok { background:#DCFCE7; color:#15803D; border:1px solid #86EFAC; }
+        /* Sidebar styles */
+        .profile-sidebar {
+          background: #fff;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-lg);
+          padding: 1.25rem;
+          box-shadow: var(--shadow-sm);
+          height: fit-content;
+        }
+        .sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; }
+        .sidebar-header h3 { font-size: 0.95rem; font-weight: 700; text-transform: uppercase; color: var(--color-text-muted); }
+        
+        .loading-state, .empty-state {
+          padding: 2rem;
+          text-align: center;
+          color: var(--color-text-muted);
+          font-size: 0.875rem;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 0.5rem;
+        }
+        .empty-state svg { font-size: 1.5rem; color: #eab308; }
+        .anim-spin { animation: spin 1s linear infinite; font-size: 1.5rem; }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Section card */
-        .dw-section { background:#fff; border:1px solid var(--color-border);
-          border-radius:var(--radius-lg); margin-bottom:1rem;
-          box-shadow:var(--shadow-sm); overflow:hidden; transition:var(--transition); }
-        .dw-section:hover { box-shadow:var(--shadow-md); }
-        .dw-locked { opacity:.45; pointer-events:none; }
+        .profile-list { display: flex; flex-direction: column; gap: 0.75rem; }
+        .profile-item-card {
+          padding: 0.85rem 1rem;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-md);
+          background: var(--color-bg);
+          cursor: pointer;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          transition: var(--transition);
+        }
+        .profile-item-card:hover {
+          border-color: var(--color-accent);
+          background: #fff;
+          box-shadow: var(--shadow-sm);
+        }
+        .profile-item-card.active {
+          border-color: var(--color-accent);
+          background: rgba(67, 97, 238, 0.04);
+        }
+        .item-info h4 { font-size: 0.95rem; font-weight: 700; color: var(--color-text); margin-bottom: 3px; }
+        .item-info span { font-size: 0.75rem; color: var(--color-text-muted); font-family: monospace; }
+        
+        .btn-icon {
+          background: transparent;
+          border: none;
+          cursor: pointer;
+          font-size: 1.2rem;
+          padding: 4px;
+          border-radius: var(--radius-sm);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--color-text-muted);
+          transition: var(--transition);
+        }
+        .btn-icon:hover { background: #f1f5f9; }
+        .btn-delete:hover { color: #dc2626; }
 
-        .dw-section-head { display:flex; align-items:center; gap:.65rem;
-          padding:.95rem 1.4rem; background:#F8FAFC;
-          border-bottom:1px solid var(--color-border); }
-        .dw-section-head svg { font-size:1.2rem; color:var(--color-accent); }
-        .dw-section-head h2 { font-size:1rem; font-weight:700; flex:1; color:var(--color-text); }
+        /* Main profile content */
+        .profile-main {}
+        .form-empty-state {
+          background: #fff;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-lg);
+          padding: 4rem 2rem;
+          text-align: center;
+          color: var(--color-text-muted);
+          box-shadow: var(--shadow-sm);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 0.75rem;
+        }
+        .form-empty-state svg { font-size: 3rem; color: var(--color-accent); opacity: 0.4; }
+        .form-empty-state h3 { font-size: 1.15rem; font-weight: 700; color: var(--color-text); }
+        .form-empty-state p { font-size: 0.875rem; max-width: 400px; margin-bottom: 0.5rem; }
 
-        .dw-num { width:26px; height:26px; border-radius:50%; background:var(--color-accent);
-          color:#fff; font-size:.75rem; font-weight:800;
-          display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        /* Form Card */
+        .profile-card {
+          background: #fff;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-lg);
+          box-shadow: var(--shadow-sm);
+          overflow: hidden;
+        }
+        .card-header {
+          padding: 1rem 1.5rem;
+          background: #f8fafc;
+          border-bottom: 1px solid var(--color-border);
+        }
+        .card-header h2 { font-size: 1.15rem; font-weight: 700; color: var(--color-text); }
+        .card-body { padding: 1.5rem; }
 
-        .dw-lock-badge { display:flex; align-items:center; gap:4px; font-size:.72rem;
-          font-weight:600; color:#94A3B8; background:#F1F5F9;
-          padding:3px 10px; border-radius:99px; }
+        .section-subtitle {
+          font-size: 0.85rem;
+          font-weight: 800;
+          color: var(--color-accent);
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin: 1.5rem 0 1rem 0;
+          border-bottom: 1px solid var(--color-border);
+          padding-bottom: 6px;
+        }
 
-        .dw-section-body { padding:1.4rem; }
-        .dw-hint { font-size:.82rem; color:var(--color-text-muted); margin-bottom:1.1rem; }
+        .dw-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .full-width { grid-column: span 2; }
 
-        /* Grid */
-        .dw-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:.9rem; margin-bottom:1.2rem; }
+        .profile-field label {
+          display: block;
+          font-size: 0.72rem;
+          font-weight: 700;
+          color: var(--color-text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.4px;
+          margin-bottom: 4px;
+        }
+        .profile-field input, .profile-field select {
+          width: 100%;
+          padding: 8px 12px;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-sm);
+          font-size: 0.875rem;
+          outline: none;
+          background: var(--color-bg);
+          transition: var(--transition);
+          color: var(--color-text);
+        }
+        .profile-field input:focus, .profile-field select:focus {
+          border-color: var(--color-accent);
+          background: #fff;
+          box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.12);
+        }
 
-        /* Field */
-        .dw-field label { display:block; font-size:.72rem; font-weight:700;
-          color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.4px; margin-bottom:4px; }
-        .dw-field input, .dw-field select {
-          width:100%; padding:9px 12px; border:1px solid var(--color-border);
-          border-radius:var(--radius-sm); font-size:.875rem; outline:none;
-          background:var(--color-bg); transition:var(--transition); color:var(--color-text); }
-        .dw-field input:focus, .dw-field select:focus {
-          border-color:var(--color-accent); background:#fff;
-          box-shadow:0 0 0 3px rgba(67,97,238,.12); }
+        /* Schema Preview */
+        .profile-schema {
+          margin-top: 1.25rem;
+          border: 1px solid var(--color-border);
+          border-radius: var(--radius-md);
+          overflow: hidden;
+        }
+        .schema-title {
+          display: block;
+          padding: 0.5rem 1rem;
+          background: #f1f5f9;
+          font-size: 0.7rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          color: var(--color-text-muted);
+          border-bottom: 1px solid var(--color-border);
+        }
+        .schema-rows { display: flex; flex-direction: column; }
+        .schema-row {
+          display: flex;
+          justify-content: space-between;
+          padding: 0.5rem 1rem;
+          border-bottom: 1px solid var(--color-border);
+          font-size: 0.8rem;
+        }
+        .schema-row:last-child { border-bottom: none; }
+        .col-name { font-weight: 700; color: var(--color-text); font-family: monospace; }
+        .col-type { color: var(--color-text-muted); }
 
-        /* Action row */
-        .dw-action-row { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; }
+        /* Banner */
+        .test-status-banner {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.75rem 1rem;
+          border-radius: var(--radius-md);
+          font-weight: 600;
+          font-size: 0.85rem;
+          margin-top: 1.25rem;
+        }
+        .test-status-banner.success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+        .test-status-banner.error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
 
-        /* Buttons */
-        .dw-btn { display:inline-flex; align-items:center; gap:6px;
-          padding:.6rem 1.2rem; border-radius:var(--radius-sm); font-size:.875rem;
-          font-weight:600; cursor:pointer; border:none; transition:var(--transition); }
-        .dw-btn:disabled { opacity:.5; cursor:not-allowed; }
-        .dw-btn-primary { background:var(--color-accent); color:#fff; }
-        .dw-btn-primary:hover:not(:disabled) { background:#3451d1; }
-        .dw-btn-success { background:#16A34A; color:#fff; }
-        .dw-btn-success:hover:not(:disabled) { background:#15803D; }
+        /* Form Actions */
+        .form-actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; align-items: center; }
+        .spacer { flex: 1; }
 
-        /* Status pills */
-        .dw-check-results { display:flex; gap:.6rem; flex-wrap:wrap; }
-        .dw-pill { display:inline-flex; align-items:center; gap:4px;
-          padding:4px 12px; border-radius:99px; font-size:.78rem; font-weight:600; }
-        .dw-pill svg { font-size:.9rem; }
-        .dw-pill-ok   { background:#DCFCE7; color:#15803D; }
-        .dw-pill-miss { background:#FEF9C3; color:#92400E; }
+        .btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 0.5rem 1.1rem;
+          border-radius: var(--radius-sm);
+          font-size: 0.875rem;
+          font-weight: 600;
+          cursor: pointer;
+          border: none;
+          transition: var(--transition);
+        }
+        .btn-sm { padding: 0.35rem 0.75rem; font-size: 0.78rem; }
+        .btn-primary { background: var(--color-accent); color: #fff; }
+        .btn-primary:hover { background: #3451d1; }
+        .btn-secondary { background: #f1f5f9; color: var(--color-text); border: 1px solid var(--color-border); }
+        .btn-secondary:hover { background: #e2e8f0; }
+        .btn-accent { background: #10b981; color: #fff; }
+        .btn-accent:hover { background: #059669; }
+        .btn-ghost { background: transparent; color: var(--color-text-muted); }
+        .btn-ghost:hover { background: #f1f5f9; color: var(--color-text); }
 
-        .dw-err-msg { display:flex; align-items:center; gap:6px; color:#DC2626;
-          font-size:.82rem; font-weight:600; }
-        .dw-err-msg svg { font-size:1.1rem; }
-
-        /* Schema preview */
-        .dw-schema { margin-top:1rem; border:1px solid var(--color-border);
-          border-radius:var(--radius-md); overflow:hidden; }
-        .dw-schema-title { display:block; padding:.4rem .9rem; background:#F1F5F9;
-          font-size:.7rem; font-weight:700; text-transform:uppercase;
-          letter-spacing:.5px; color:var(--color-text-muted);
-          border-bottom:1px solid var(--color-border); }
-        .dw-schema-rows { display:grid; }
-        .dw-schema-row { display:flex; justify-content:space-between; align-items:center;
-          padding:.45rem .9rem; border-bottom:1px solid var(--color-border); font-size:.8rem; }
-        .dw-schema-row:last-child { border-bottom:none; }
-        .dw-col-name { font-weight:700; color:var(--color-text); font-family:monospace; }
-        .dw-col-type { color:var(--color-text-muted); }
-
-        /* Checkbox row */
-        .dw-checkbox-row { display:flex; align-items:center; gap:.6rem;
-          cursor:pointer; font-size:.875rem; font-weight:500; color:var(--color-text); }
-        .dw-checkbox-row input[type=checkbox] { width:17px; height:17px; accent-color:var(--color-accent); cursor:pointer; }
-
-        /* Spinner reuse */
-        .spinner { width:14px; height:14px; border:2px solid rgba(255,255,255,.3);
-          border-top-color:#fff; border-radius:50%;
-          animation:spin .6s linear infinite; display:inline-block; }
-        @keyframes spin { to { transform:rotate(360deg); } }
-
-        @media(max-width:580px){ .dw-grid-2{ grid-template-columns:1fr; } }
+        @media(max-width: 900px) {
+          .profile-container { grid-template-columns: 1fr; }
+          .dw-grid-2 { grid-template-columns: 1fr; }
+          .full-width { grid-column: span 1; }
+        }
       `}</style>
     </div>
   )

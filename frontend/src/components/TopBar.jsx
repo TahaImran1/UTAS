@@ -1,8 +1,8 @@
 import React from 'react'
 import { MdSearch, MdClose } from 'react-icons/md'
-import { useLocation } from 'react-router-dom'
+import { useLocation, Link } from 'react-router-dom'
 
-export default function TopBar() {
+export default function TopBar({ isLoggedIn }) {
   const location = useLocation()
   
   // Map route to title
@@ -13,6 +13,7 @@ export default function TopBar() {
       case '/companies': return 'Companies'
       case '/employees': return 'Employees'
       case '/logs': return 'Attendance Logs'
+      case '/master-settings': return 'Master Settings'
       default: return 'UTAS'
     }
   }
@@ -27,10 +28,21 @@ export default function TopBar() {
         <MdClose size={16} color="var(--color-text-muted)" style={{cursor: 'pointer'}} />
       </div>
 
-      <div className="user-badge">
-        <div className="user-avatar">A</div>
-        <span className="user-name">Hi, Admin</span>
-      </div>
+      {isLoggedIn ? (
+        <div className="user-badge">
+          <div className="user-avatar" style={{ background: '#3b82f6', color: 'white' }}>M</div>
+          <span className="user-name">Master User</span>
+        </div>
+      ) : (
+        <Link 
+          to="/login" 
+          className="btn btn-primary" 
+          style={{ textDecoration: 'none', padding: '8px 16px', fontSize: '0.85rem', fontWeight: 600 }}
+        >
+          Sign In
+        </Link>
+      )}
     </div>
   )
 }
+

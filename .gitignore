@@ -35,3 +35,13 @@ frontend/--win32-x64/
 *.exe
 *.zip
 .vite/
+
+# ── C# Build Outputs ──
+**/bin/
+**/obj/
+
+# ── Python / PyInstaller Build Outputs & Caches ──
+backend/build/
+.pytest_cache/
+**/__pycache__/
+

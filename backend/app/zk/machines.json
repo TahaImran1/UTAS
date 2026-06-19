@@ -22,7 +22,9 @@
         "password": 0,
         "sn": "AMT602511730",
         "driver": "fk",
-        "protocol": "HTTP",
-        "company_name": "Temp Comp"
+        "protocol": "TCP",
+        "company_name": "Temp Comp",
+        "machine_no": 1,
+        "license": 1263
     }
 ]

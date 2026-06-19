@@ -16,10 +16,13 @@ from typing import Dict, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 
 from zk import ZK
 from zk.exception import ZKNetworkError, ZKErrorResponse, ZKErrorConnection
 import machines_config
+import fk_bridge_client
+from fk_bridge_client import is_fk_driver
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +43,28 @@ class MachineState:
         self.location = config.get("location", "")
         self.password = int(config.get("password", 0))
         self.protocol = config.get("protocol", "TCP") # TCP or HTTP
-        self.company_name = config.get("company_name", "None")
+        self.driver = (config.get("driver") or "zk").lower()
+        if self.driver == "amt":
+            self.driver = "fk"
+
+        self.name         = config.get("name", "")
+        self.enabled      = config.get("enabled", True)
+        if "company_names" in config:
+            self.company_names = config["company_names"] or []
+        else:
+            comp = config.get("company_name", "None")
+            if comp and comp != "None":
+                self.company_names = [comp]
+            else:
+                self.company_names = []
+
+        self.sync_type     = config.get("sync_type", "interval")
+        self.sync_interval = int(config.get("sync_interval", 20))
+        self.sync_days     = config.get("sync_days", [])
+        self.sync_time     = config.get("sync_time", "00:00")
 
         self.conn: Optional[ZK]  = None
+        self.fk_connected: bool = False
         self.status: str         = "offline"   # online | offline | syncing
         self.last_sync: Optional[datetime] = None
         self.last_record_count: int = 0
@@ -50,10 +72,23 @@ class MachineState:
         self.last_seen: Optional[datetime] = None # For Push heartbeats
         self.lock = threading.Lock()
 
+    def get_schedule_key(self) -> tuple:
+        return (
+            self.sync_type,
+            self.sync_interval,
+            tuple(self.sync_days) if self.sync_days else (),
+            self.sync_time,
+            self.protocol,
+            self.driver,
+            tuple(self.company_names) if self.company_names else (),
+            self.enabled,
+            self.name
+        )
+
     def to_dict(self) -> dict:
         # For HTTP (Push) devices, status is based on recent pulse
         status = self.status
-        if self.protocol == "HTTP" and self.last_seen:
+        if self.last_seen and (self.protocol == "HTTP" or is_fk_driver(self.driver)):
             delta = (datetime.now() - self.last_seen).total_seconds()
             if delta < 120: # 2 minutes
                 status = "online"
@@ -70,7 +105,15 @@ class MachineState:
             "last_record_count":self.last_record_count,
             "last_error":       self.last_error,
             "protocol":         self.protocol,
-            "company_name":     self.company_name
+            "company_name":     self.company_names[0] if self.company_names else "None",
+            "company_names":    self.company_names,
+            "driver":           self.driver,
+            "sync_type":        self.sync_type,
+            "sync_interval":    self.sync_interval,
+            "sync_days":        self.sync_days,
+            "sync_time":        self.sync_time,
+            "name":             self.name,
+            "enabled":          self.enabled,
         }
 
 
@@ -85,6 +128,7 @@ class ZKPullManager:
         self._scheduler = BackgroundScheduler(daemon=True)
         self._sync_lock = threading.Lock()
         self.enabled = True # Administrative toggle for the engine
+        self._active_schedules = {} # Track active schedule keys
 
     # ─── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -94,15 +138,9 @@ class ZKPullManager:
         # Sync Company/Protocol mappings from Oracle
         self.sync_metadata_from_oracle()
         if AUTO_START:
-            self._scheduler.add_job(
-                self._sync_all_tick,
-                trigger=IntervalTrigger(seconds=SYNC_INTERVAL),
-                id="pull_sync_all",
-                replace_existing=True,
-                next_run_time=datetime.now()   # run immediately on start
-            )
             self._scheduler.start()
-            logger.info(f"[PullEngine] Auto-sync started — every {SYNC_INTERVAL}s")
+            self.reconcile_jobs()
+            logger.info("[PullEngine] Auto-sync started — per-machine jobs scheduled")
         else:
             logger.info("[PullEngine] Auto-sync disabled (PULL_AUTO_START=false)")
 
@@ -117,16 +155,192 @@ class ZKPullManager:
     def reload(self):
         """Hot-reload machines from machines.json without restart."""
         self._reload_machines()
+        self.reconcile_jobs()
 
     # ─── Internal helpers ────────────────────────────────────────────────────────
 
     def _reload_machines(self):
         configs = machines_config.load_machines()
+        current_keys = set()
         for cfg in configs:
             key = cfg.get("sn") or f"{cfg['ip']}:{cfg.get('port', 4370)}"
+            current_keys.add(key)
             if key not in self._machines:
                 self._machines[key] = MachineState(cfg)
+            else:
+                state = self._machines[key]
+                state.config = cfg
+                state.ip = cfg["ip"]
+                state.port = int(cfg.get("port", 4370))
+                state.location = cfg.get("location", "")
+                state.password = int(cfg.get("password", 0))
+                state.sn = cfg.get("sn", "")
+                state.protocol = cfg.get("protocol", "TCP")
+                state.name = cfg.get("name", "")
+                state.enabled = cfg.get("enabled", True)
+                state.company_names = cfg.get("company_names", [])
+                if not state.company_names:
+                    comp = cfg.get("company_name", "None")
+                    if comp and comp != "None":
+                        state.company_names = [comp]
+                    else:
+                        state.company_names = []
+                state.sync_type = cfg.get("sync_type", "interval")
+                state.sync_interval = int(cfg.get("sync_interval", 20))
+                state.sync_days = cfg.get("sync_days", [])
+                state.sync_time = cfg.get("sync_time", "00:00")
+                state.driver = (cfg.get("driver") or "zk").lower()
+                if state.driver == "amt":
+                    state.driver = "fk"
+        
+        # Disconnect and remove deleted machines
+        for key in list(self._machines.keys()):
+            if key not in current_keys:
+                state = self._machines.pop(key, None)
+                if state:
+                    self._disconnect(state)
         logger.info(f"[PullEngine] Loaded {len(self._machines)} machine(s)")
+
+    def reconcile_jobs(self):
+        """
+        Reconcile scheduler jobs to match the current in-memory machines state.
+        This handles adding new jobs, updating changed jobs, and removing deleted jobs.
+        """
+        if not self.enabled:
+            for job in list(self._scheduler.get_jobs()):
+                if job.id.startswith("pull_machine_"):
+                    self._scheduler.remove_job(job.id)
+            self._active_schedules.clear()
+            return
+
+        current_keys = set(self._machines.keys())
+        
+        # 1. Remove jobs for machines that no longer exist
+        for job_id in [job.id for job in self._scheduler.get_jobs()]:
+            if job_id.startswith("pull_machine_"):
+                m_key = job_id[len("pull_machine_"):]
+                if m_key not in current_keys:
+                    try:
+                        self._scheduler.remove_job(job_id)
+                        logger.info(f"[PullEngine] Removed scheduler job for deleted machine: {m_key}")
+                    except Exception as e:
+                        logger.error(f"[PullEngine] Error removing job {job_id}: {e}")
+                    self._active_schedules.pop(m_key, None)
+
+        # 2. Add or update jobs for existing machines
+        for key, state in self._machines.items():
+            job_id = f"pull_machine_{key}"
+            sched_key = state.get_schedule_key()
+            
+            existing_job = self._scheduler.get_job(job_id)
+            if existing_job and self._active_schedules.get(key) == sched_key:
+                continue
+                
+            if existing_job:
+                try:
+                    self._scheduler.remove_job(job_id)
+                    logger.info(f"[PullEngine] Removing existing job {job_id} to update schedule.")
+                except Exception as e:
+                    logger.error(f"[PullEngine] Error removing job {job_id} for update: {e}")
+            
+            trigger = None
+            if state.sync_type == "cron":
+                try:
+                    day_of_week = ",".join(state.sync_days) if state.sync_days else "*"
+                    parts = state.sync_time.split(":")
+                    hour = int(parts[0]) if len(parts) > 0 else 0
+                    minute = int(parts[1]) if len(parts) > 1 else 0
+                    trigger = CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute, second=0)
+                except Exception as e:
+                    logger.error(f"[PullEngine] Failed to create CronTrigger for {key}: {e}. Falling back to default interval.")
+            
+            if trigger is None:
+                interval_secs = state.sync_interval
+                if interval_secs < 20:
+                    interval_secs = 20
+                trigger = IntervalTrigger(seconds=interval_secs)
+                
+            try:
+                self._scheduler.add_job(
+                    self._pull_machine_job,
+                    trigger=trigger,
+                    args=[key],
+                    id=job_id,
+                    replace_existing=True,
+                    next_run_time=datetime.now()
+                )
+                self._active_schedules[key] = sched_key
+                logger.info(f"[PullEngine] Scheduled job {job_id} successfully (Type: {state.sync_type}, Args: {sched_key})")
+            except Exception as e:
+                logger.error(f"[PullEngine] Failed to schedule job {job_id}: {e}")
+
+    def _pull_machine_job(self, key: str):
+        """Scheduler job callback: pulls from the machine or queues a push command."""
+        if not self.enabled:
+            return
+            
+        state = self._machines.get(key)
+        if not state:
+            logger.warning(f"[PullEngine] Scheduled job fired for non-existent machine: {key}")
+            return
+
+        if not state.enabled:
+            logger.debug(f"[PullEngine] Scheduled job for {key} skipped — Machine is disabled.")
+            return
+
+        # MANDATORY CHECK: Machine must be assigned to a company
+        if not state.company_names:
+            logger.debug(f"[PullEngine] Scheduled job for {key} skipped — No company assigned.")
+            return
+            
+        if state.protocol == "HTTP":
+            self._queue_push_sync_command(state)
+        else:
+            threading.Thread(
+                target=self._pull_machine,
+                args=(state,),
+                daemon=True,
+                name=f"pull-{state.ip}"
+            ).start()
+
+    def _queue_push_sync_command(self, state: MachineState):
+        """Queue a get_glog or DATA QUERY ATTLOG command in main.COMMAND_QUEUE for HTTP Push devices."""
+        import sys
+        COMMAND_QUEUE = None
+        main_module = sys.modules.get('__main__')
+        if main_module and hasattr(main_module, 'COMMAND_QUEUE'):
+            COMMAND_QUEUE = main_module.COMMAND_QUEUE
+        else:
+            try:
+                import main
+                COMMAND_QUEUE = main.COMMAND_QUEUE
+            except ImportError:
+                pass
+
+        if COMMAND_QUEUE is None:
+            logger.error("[PullEngine] Failed to resolve COMMAND_QUEUE from __main__ or main")
+            return
+
+        sn = state.sn
+        if not sn:
+            logger.warning(f"[PullEngine] Push device scheduling skipped: no Serial Number found for {state.ip}")
+            return
+
+        if sn not in COMMAND_QUEUE:
+            COMMAND_QUEUE[sn] = []
+
+        driver = (state.driver or "zk").lower()
+        if driver in ("fk", "amt"):
+            if "get_glog" not in COMMAND_QUEUE[sn]:
+                COMMAND_QUEUE[sn].append("get_glog")
+                logger.info(f"[PullEngine] Scheduled: Queued initial get_glog for FK Push device {sn}")
+        else:
+            end_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cmd = f"C:101:DATA QUERY ATTLOG StartTime=2000-01-01 00:00:00\tEndTime={end_ts}"
+            has_query = any("DATA QUERY ATTLOG" in c for c in COMMAND_QUEUE[sn])
+            if not has_query:
+                COMMAND_QUEUE[sn].append(cmd)
+                logger.info(f"[PullEngine] Scheduled: Queued DATA QUERY ATTLOG for ZK Push device {sn}")
 
     def _get_or_create_state(self, ip: str, port: int = 4370) -> Optional[MachineState]:
         for state in self._machines.values():
@@ -135,7 +349,24 @@ class ZKPullManager:
         return None
 
     def _connect(self, state: MachineState) -> bool:
-        """Attempt TCP connection to device. Returns True if successful."""
+        """Attempt connection (pyzk or FK bridge)."""
+        if is_fk_driver(state.driver):
+            try:
+                ok, err = fk_bridge_client.connect(state.ip, state.port, state.config)
+                state.fk_connected = ok
+                if ok:
+                    state.status = "online"
+                    state.last_error = ""
+                    return True
+                state.status = "offline"
+                state.last_error = err
+                logger.warning(f"[PullEngine] FK bridge connect failed {state.ip}:{state.port} — {err}")
+                return False
+            except Exception as e:
+                state.status = "offline"
+                state.last_error = str(e)
+                logger.warning(f"[PullEngine] FK bridge error {state.ip} — {e}")
+                return False
         try:
             zk = ZK(
                 state.ip,
@@ -170,7 +401,9 @@ class ZKPullManager:
             return False
 
     def _disconnect(self, state: MachineState):
-        if state.conn:
+        if is_fk_driver(state.driver):
+            state.fk_connected = False
+        elif state.conn:
             try:
                 state.conn.disconnect()
             except Exception:
@@ -198,15 +431,17 @@ class ZKPullManager:
 
     def _pull_machine(self, state: MachineState):
         """Pull attendance from one machine and insert to Oracle."""
-        # MANDATORY CHECK: Machine must be assigned to a company
-        if state.company_name in ["None", "", None]:
-            logger.debug(f"[PullEngine] {state.ip} skipped - Not mapped to a company.")
+        if not state.enabled:
+            logger.debug(f"[PullEngine] {state.sn or state.ip} skipped — Machine is disabled.")
             return
 
-        # FK devices in HTTP push mode rely solely on push — no TCP bridge pull needed.
-        # Silently skip to avoid flooding the log with TCP connect warnings.
-        if getattr(state, "protocol", "TCP") == "HTTP":
+        if state.protocol == "HTTP":
             logger.debug(f"[PullEngine] {state.sn or state.ip} is HTTP push-only — skipping TCP pull")
+            return
+
+        # MANDATORY CHECK: Machine must be assigned to a company
+        if not state.company_names:
+            logger.debug(f"[PullEngine] {state.ip} skipped - Not mapped to any company.")
             return
 
         with state.lock:
@@ -216,40 +451,48 @@ class ZKPullManager:
 
             state.status = "syncing"
             try:
-                # Connect if not already connected
-                if not state.conn or not state.conn.is_connect:
-                    if not self._connect(state):
-                        return
-
-                # Pull records
-                records = state.conn.get_attendance()
-                count = len(records)
-                logger.info(f"[PullEngine] {state.ip} — {count} records pulled")
-
-                if count > 0:
-                    # Get machine reference string (same format as old app)
-                    try:
-                        device_name = state.conn.get_device_name()
-                        sn          = state.sn or state.conn.get_serialnumber()
-                        mac         = state.conn.get_mac()
-                        machine_ref = f"{device_name} - {sn} - {mac}"
-                    except Exception:
-                        machine_ref = state.ip
-
-                    # Insert to Active Database using existing db function
-                    self._insert_to_db(records, machine_ref)
-
-                    # Auto-delete from device if configured
-                    if AUTO_DELETE:
+                if is_fk_driver(state.driver):
+                    if not state.fk_connected:
+                        if not self._connect(state):
+                            state.status = "offline"
+                            return
+                    records, err = fk_bridge_client.pull_attendance(state.ip, state.port, state.config)
+                    if err:
+                        raise RuntimeError(err)
+                    count = len(records)
+                    logger.info(f"[PullEngine] FK {state.ip} — {count} records pulled")
+                    if count > 0:
+                        machine_ref = state.sn or state.ip
+                        self._insert_to_db(records, machine_ref, state.company_names)
+                    if AUTO_DELETE and count > 0:
+                        fk_bridge_client.clear_attendance(state.ip, state.port, state.config)
+                else:
+                    if not state.conn or not state.conn.is_connect:
+                        if not self._connect(state):
+                            state.status = "offline"
+                            return
+                    records = state.conn.get_attendance()
+                    count = len(records)
+                    logger.info(f"[PullEngine] {state.ip} — {count} records pulled")
+                    if count > 0:
                         try:
-                            state.conn.disable_device()
+                            device_name = state.conn.get_device_name()
+                            sn          = state.sn or state.conn.get_serialnumber()
+                            mac         = state.conn.get_mac()
+                            machine_ref = f"{device_name} - {sn} - {mac}"
+                        except Exception:
+                            machine_ref = state.ip
+                        self._insert_to_db(records, machine_ref, state.company_names)
+                        if AUTO_DELETE:
                             try:
-                                state.conn.clear_attendance()
-                                logger.info(f"[PullEngine] {state.ip} — attendance cleared from device")
-                            finally:
-                                state.conn.enable_device()
-                        except Exception as e:
-                            logger.error(f"[PullEngine] {state.ip} — clear failed: {e}")
+                                state.conn.disable_device()
+                                try:
+                                    state.conn.clear_attendance()
+                                    logger.info(f"[PullEngine] {state.ip} — attendance cleared from device")
+                                finally:
+                                    state.conn.enable_device()
+                            except Exception as e:
+                                logger.error(f"[PullEngine] {state.ip} — clear failed: {e}")
 
                 state.last_sync = datetime.now()
                 state.last_record_count = count
@@ -261,12 +504,11 @@ class ZKPullManager:
                 state.status = "offline"
                 self._disconnect(state)
 
-    def _insert_to_db(self, records, machine_ref: str):
+    def _insert_to_db(self, records, machine_ref: str, company_names: list[str]):
         """Reuse the existing zk/db.py generic insert function."""
         try:
             from zk import db
-            db_type = db.get_active_db_type()
-            db.insert_log_generic(records, machine_ref, db_type)
+            db.insert_log_generic(records, machine_ref, company_names)
         except Exception as e:
             logger.error(f"[PullEngine] Database insert error: {e}")
             raise
@@ -297,8 +539,42 @@ class ZKPullManager:
         state = self._find_state(sn, ip, port)
         if not state:
             return {"error": "Machine not found"}
+            
+        if state.protocol == "HTTP":
+            return {
+                "ip":              state.ip,
+                "port":            state.port,
+                "location":        state.location,
+                "firmware":        state.config.get("firmware", "Unknown"),
+                "serial_number":   state.sn,
+                "platform":        state.config.get("platform", "Unknown"),
+                "mac":             state.config.get("mac", "Unknown"),
+                "device_name":     state.config.get("device_name", "Unknown"),
+                "device_time":     state.config.get("device_time", "Unknown"),
+                "users":           state.config.get("users", 0),
+                "records":         state.config.get("records", 0),
+                "fingers":         state.config.get("fingers", 0),
+                "users_cap":       state.config.get("users_cap", "Unknown"),
+                "rec_cap":         state.config.get("rec_cap", "Unknown"),
+            }
+
         try:
             with state.lock:
+                if is_fk_driver(state.driver):
+                    if not state.fk_connected and not self._connect(state):
+                        return {"error": state.last_error}
+                    info, err = fk_bridge_client.device_info(state.ip, state.port, state.config)
+                    if err:
+                        return {"error": err}
+                    return {
+                        "ip": state.ip,
+                        "port": state.port,
+                        "location": state.location,
+                        "driver": state.driver,
+                        "serial_number": info.get("serial_number"),
+                        "device_name": info.get("product_name"),
+                        "device_time": info.get("device_time"),
+                    }
                 if not state.conn or not state.conn.is_connect:
                     if not self._connect(state):
                         return {"error": state.last_error}
@@ -334,6 +610,9 @@ class ZKPullManager:
             return {"success": False, "error": "Machine not found"}
         try:
             with state.lock:
+                if is_fk_driver(state.driver):
+                    ok, err = fk_bridge_client.clear_attendance(state.ip, state.port, state.config)
+                    return {"success": ok, "error": err or None}
                 if not state.conn or not state.conn.is_connect:
                     if not self._connect(state):
                         return {"success": False, "error": state.last_error}
@@ -351,8 +630,45 @@ class ZKPullManager:
         state = self._find_state(sn, ip, port)
         if not state:
             return {"success": False, "error": "Machine not found"}
+
+        if state.protocol == "HTTP":
+            driver = (state.driver or "zk").lower()
+            if driver in ("fk", "amt"):
+                return {
+                    "success": True,
+                    "message": f"FK Push device {state.sn} automatically syncs time on heartbeat."
+                }
+            else:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cmd = f"C:102:SET OPTIONS DateTime={now_str}"
+                import sys
+                COMMAND_QUEUE = None
+                main_module = sys.modules.get('__main__')
+                if main_module and hasattr(main_module, 'COMMAND_QUEUE'):
+                    COMMAND_QUEUE = main_module.COMMAND_QUEUE
+                else:
+                    try:
+                        import main
+                        COMMAND_QUEUE = main.COMMAND_QUEUE
+                    except ImportError:
+                        pass
+                if COMMAND_QUEUE is None:
+                    return {"success": False, "error": "Failed to resolve COMMAND_QUEUE"}
+                if state.sn not in COMMAND_QUEUE:
+                    COMMAND_QUEUE[state.sn] = []
+                if cmd not in COMMAND_QUEUE[state.sn]:
+                    COMMAND_QUEUE[state.sn].append(cmd)
+                    logger.info(f"[PullEngine] SyncTime: Queued DateTime SET OPTIONS command for {state.sn}")
+                return {
+                    "success": True,
+                    "message": f"Time sync command queued for {state.sn}. Clock will sync on next heartbeat."
+                }
+
         try:
             with state.lock:
+                if is_fk_driver(state.driver):
+                    ok, err = fk_bridge_client.sync_time(state.ip, state.port, state.config)
+                    return {"success": ok, "synced_to": datetime.now().isoformat(), "error": err or None}
                 if not state.conn or not state.conn.is_connect:
                     if not self._connect(state):
                         return {"success": False, "error": state.last_error}
@@ -365,11 +681,22 @@ class ZKPullManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def test_connection(self, ip: str, port: int = 4370, password: int = 0) -> dict:
+    def test_connection(self, ip: str, port: int = 4370, password: int = 0, driver: str = "zk", config: dict = None) -> dict:
         """
         Test a connection to a machine (used by UI Add Machine flow).
         Returns device info without persisting anything.
         """
+        cfg = config or {"port": port, "password": password, "driver": driver}
+        use_fk = is_fk_driver(driver) or port == 5005
+        
+        if use_fk:
+            res = fk_bridge_client.test_connection(ip, port, cfg)
+            if res.get("success"):
+                res["driver"] = "fk"
+                return res
+            if is_fk_driver(driver):
+                return res
+
         try:
             zk = ZK(ip, port=port, timeout=PULL_TIMEOUT,
                     password=password, ommit_ping=True, verbose=False)
@@ -381,35 +708,28 @@ class ZKPullManager:
                 "device_name":   self._safe_call(conn.get_device_name),
                 "platform":      self._safe_call(conn.get_platform),
                 "mac":           self._safe_call(conn.get_mac),
+                "driver":        "zk"
             }
             conn.disconnect()
             return info
         except Exception as e:
+            if not use_fk:
+                cfg_fk = cfg.copy()
+                cfg_fk["driver"] = "fk"
+                res = fk_bridge_client.test_connection(ip, port, cfg_fk)
+                if res.get("success"):
+                    res["driver"] = "fk"
+                    return res
             return {"success": False, "error": str(e)}
 
     def add_machine(self, machine: dict) -> dict:
         """Add a new machine to machines.json and register it in the engine."""
         # 1. Save technical config to JSON
         machines_config.save_machine(machine)
-        
-        # 2. Save metadata (Company/Protocol) to Oracle
-        try:
-            from zk import db
-            config_db = db.load_latest_config("Oracle")
-            conn = db.connect_db_oracle(config_db)
-            db.upsert_machine_meta(
-                conn, 
-                machine.get("sn", ""), 
-                machine.get("ip", ""),
-                machine.get("protocol", "TCP"),
-                machine.get("company_name", "None")
-            )
-            conn.close()
-        except Exception as e:
-            logger.error(f"[PullEngine] Failed to save metadata to Oracle: {e}")
 
         key = machine.get("sn") or f"{machine['ip']}:{machine.get('port', 4370)}"
         self._machines[key] = MachineState(machine)
+        self.reconcile_jobs()
         return {"success": True, "machine": machine}
 
     def remove_machine(self, sn: str = "", ip: str = "", port: int = 4370) -> dict:
@@ -420,6 +740,7 @@ class ZKPullManager:
             key = sn or f"{ip}:{port}"
             self._machines.pop(key, None)
         machines_config.delete_machine(sn=sn, ip=ip, port=port)
+        self.reconcile_jobs()
         return {"success": True}
 
     def get_all_status(self) -> list:
@@ -427,28 +748,44 @@ class ZKPullManager:
         return [state.to_dict() for state in self._machines.values()]
 
     def sync_metadata_from_oracle(self):
-        """Fetch SN mappings from Oracle and inject into in-memory states."""
-        try:
-            from zk import db
-            config_db = db.load_latest_config("Oracle")
-            conn = db.connect_db_oracle(config_db)
-            meta = db.get_machine_meta(conn)
-            conn.close()
-
-            for sn, data in meta.items():
-                if sn in self._machines:
-                    self._machines[sn].protocol = data.get("protocol", "TCP")
-                    self._machines[sn].company_name = data.get("company_name", "None")
-                    logger.info(f"[PullEngine] Synced metadata for {sn} (Company: {data.get('company_name')})")
-        except Exception as e:
-            logger.warning(f"[PullEngine] Skipping metadata sync: {e}")
+        """No-op as COMP_MACHINE table is removed and local config is the source of truth."""
+        pass
 
     def update_machine_metadata(self, sn: str, protocol: str, company: str):
         """Update the in-memory state of a machine after a mapping change."""
         if sn in self._machines:
-            self._machines[sn].protocol = protocol
-            self._machines[sn].company_name = company
-            logger.info(f"[PullEngine] Updated metadata for {sn}: Protocol={protocol}, Company={company}")
+            state = self._machines[sn]
+            state.protocol = protocol
+            state.company_names = [company] if company and company != "None" else []
+            if protocol == "HTTP":
+                state.driver = "zk"
+                state.config["driver"] = "zk"
+            state.config["protocol"] = protocol
+            state.config["company_names"] = state.company_names
+            if "company_name" in state.config:
+                del state.config["company_name"]
+            machines_config.save_machine(state.config)
+            logger.info(f"[PullEngine] Updated and persisted metadata for {sn}: Protocol={protocol}, Companies={state.company_names}, Driver={state.driver}")
+            self.reconcile_jobs()
+
+    def update_fk_device_metadata(self, sn: str, company: str = None, port: int = None):
+        """Upgrade or refresh FK dual-mode device registration."""
+        if sn not in self._machines:
+            return
+        state = self._machines[sn]
+        state.driver = "fk"
+        state.protocol = "TCP"
+        state.config["driver"] = "fk"
+        state.config["protocol"] = "TCP"
+        if port is not None:
+            state.port = port
+            state.config["port"] = port
+        if company is not None:
+            state.company_name = company
+            state.config["company_name"] = company
+        machines_config.save_machine(state.config)
+        logger.info(f"[PullEngine] FK metadata for {sn}: driver=fk protocol=TCP port={state.port}")
+        self.reconcile_jobs()
 
     def update_pulse(self, sn: str):
         """Register a heartbeat pulse for a push device."""
