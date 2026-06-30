@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import {
   MdSearch, MdFingerprint, MdDelete, MdRefresh, MdClearAll,
-  MdInfo, MdAccessTime, MdClose, MdToggleOn, MdToggleOff, MdSettings, MdCheck
+  MdInfo, MdAccessTime, MdClose, MdToggleOn, MdToggleOff, MdSettings, MdCheck,
+  MdFileDownload
 } from 'react-icons/md'
 import toast from 'react-hot-toast'
-import {
+import client, {
   getMachines,
   addMachine,
   removeMachine,
@@ -72,6 +73,7 @@ export default function Machines({ isLoggedIn }) {
   const [testing, setTesting] = useState(false)
   const [infoModal, setInfoModal] = useState(null)
   const [confirmModal, setConfirmModal] = useState(null)
+  const [downloadModal, setDownloadModal] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
 
   // Scheduling State
@@ -273,6 +275,35 @@ export default function Machines({ isLoggedIn }) {
       toast.error('Server error', { id: t })
     }
   }
+
+  const handleDownloadDeviceLogs = async (sn, formatType) => {
+    const t = toast.loading(`Initiating download for device ${sn}...`)
+    try {
+      const response = await client.get(`/pull/machines/${sn}/download-logs?format=${formatType}`, {
+        responseType: 'blob'
+      })
+      const blob = new Blob([response.data], { type: response.headers['content-type'] })
+      const link = document.createElement('a')
+      link.href = window.URL.createObjectURL(blob)
+      link.download = `device_logs_${sn}_${new Date().toISOString().slice(0,10)}.${formatType === 'txt' ? 'txt' : 'csv'}`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(link.href)
+      toast.success('Download complete!', { id: t })
+    } catch (err) {
+      const defaultErr = 'Download failed'
+      if (err.response && err.response.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text()
+          const parsed = JSON.parse(text)
+          toast.error(parsed.detail || defaultErr, { id: t })
+          return
+        } catch (_) {}
+      }
+      toast.error(err.response?.data?.detail || defaultErr, { id: t })
+    }
+  }
   
   const handleClear = (sn) => {
     setConfirmModal({
@@ -445,12 +476,15 @@ export default function Machines({ isLoggedIn }) {
                   </span>
                 </div>
                 <div className="machine-info-row" style={{ border: 'none', color: 'var(--color-text-muted)', fontSize: '11px', marginTop: '4px' }}>
-                  {m.last_sync ? `Last sync: ${new Date(m.last_sync).toLocaleTimeString()}` : 'Never synced'}
+                  {m.last_sync ? `Last sync: ${new Date(m.last_sync).toLocaleString()}` : 'Never synced'}
                 </div>
 
                 <div className="machine-card-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
                   <button className="btn btn-ghost btn-sm" style={{ flex: '1 1 30%' }} title="Manual Pull" onClick={() => handlePull(m.sn)} disabled={!m.enabled}>
                     <MdRefresh /> Pull
+                  </button>
+                  <button className="btn btn-ghost btn-sm" style={{ flex: '1 1 30%' }} title="Download Logs" onClick={() => setDownloadModal(m)} disabled={!m.enabled}>
+                    <MdFileDownload /> Download
                   </button>
                   
                   {isLoggedIn && (
@@ -737,6 +771,35 @@ export default function Machines({ isLoggedIn }) {
                 confirmModal.onConfirm();
                 setConfirmModal(null);
               }}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Download Format Selector Modal */}
+      {downloadModal && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: '400px', textAlign: 'center' }}>
+            <h2 style={{ fontSize: '18px', fontWeight: 'bold' }}>Download Logs</h2>
+            <p style={{ margin: '15px 0', color: 'var(--color-text-muted)', fontSize: '13px', lineHeight: '1.4' }}>
+              Select file format to manually download all available attendance logs from device <strong>{downloadModal.name || downloadModal.ip}</strong> (SN: {downloadModal.sn || '---'}).
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', margin: '20px 0' }}>
+              <button className="btn btn-primary" style={{ width: '100%', padding: '10px', fontSize: '13px' }} onClick={() => {
+                handleDownloadDeviceLogs(downloadModal.sn, 'csv');
+                setDownloadModal(null);
+              }}>
+                Excel / CSV Format (.csv)
+              </button>
+              <button className="btn btn-secondary" style={{ width: '100%', padding: '10px', fontSize: '13px', border: '1px solid var(--color-border)' }} onClick={() => {
+                handleDownloadDeviceLogs(downloadModal.sn, 'txt');
+                setDownloadModal(null);
+              }}>
+                Plain Text Tab-Separated (.txt)
+              </button>
+            </div>
+            <div className="modal-actions" style={{ justifyContent: 'center' }}>
+              <button className="btn btn-ghost" onClick={() => setDownloadModal(null)}>Cancel</button>
             </div>
           </div>
         </div>

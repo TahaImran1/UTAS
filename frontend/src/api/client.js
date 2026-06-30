@@ -69,6 +69,15 @@ export const syncTime          = (sn)            => client.post(`/pull/sync-time
 // ── Attendance logs ───────────────────────────────────────────────────────────
 export const getAttendanceLogs = (params)        => client.get('/pull/attendance/logs', { params })
 
+// ── Offline logs ──────────────────────────────────────────────────────────────
+export const getOfflineLogsStatus = ()           => client.get('/api/admin/offline-logs/status')
+export const syncOfflineLogs      = ()           => client.post('/api/admin/offline-logs/sync')
+export const uploadCompanyLogs    = (companyName, formData) => client.post(`/api/admin/companies/${companyName}/upload-logs`, formData, {
+  headers: {
+    'Content-Type': 'multipart/form-data'
+  }
+})
+
 // ── Dashboard stats ───────────────────────────────────────────────────────────
 export const getDashboardStats = ()              => client.get('/pull/stats')
 

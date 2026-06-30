@@ -66,7 +66,15 @@ class MachineState:
         self.conn: Optional[ZK]  = None
         self.fk_connected: bool = False
         self.status: str         = "offline"   # online | offline | syncing
+        
         self.last_sync: Optional[datetime] = None
+        last_sync_str = config.get("last_sync")
+        if last_sync_str:
+            try:
+                self.last_sync = datetime.fromisoformat(last_sync_str.replace("Z", "+00:00"))
+            except Exception:
+                pass
+                
         self.last_record_count: int = 0
         self.last_error: str     = ""
         self.last_seen: Optional[datetime] = None # For Push heartbeats
@@ -115,6 +123,29 @@ class MachineState:
             "name":             self.name,
             "enabled":          self.enabled,
         }
+
+    def get_machine_ref(self) -> str:
+        """Returns the machine reference string used for database inserts."""
+        if self.protocol == "HTTP":
+            return self.sn
+        if is_fk_driver(self.driver):
+            return self.sn or self.ip
+        # For ZK TCP, try to get from active connection or cached config
+        if self.conn and self.conn.is_connect:
+            try:
+                device_name = self.conn.get_device_name()
+                sn = self.sn or self.conn.get_serialnumber()
+                mac = self.conn.get_mac()
+                return f"{device_name} - {sn} - {mac}"
+            except Exception:
+                pass
+        
+        # Fallback to cached properties in config
+        device_name = self.config.get("device_name") or self.name or "ZK Device"
+        mac = self.config.get("mac")
+        if device_name and self.sn and mac:
+            return f"{device_name} - {self.sn} - {mac}"
+        return self.sn or self.ip
 
 
 class ZKPullManager:
@@ -170,6 +201,12 @@ class ZKPullManager:
             else:
                 state = self._machines[key]
                 state.config = cfg
+                last_sync_str = cfg.get("last_sync")
+                if last_sync_str:
+                    try:
+                        state.last_sync = datetime.fromisoformat(last_sync_str.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
                 state.ip = cfg["ip"]
                 state.port = int(cfg.get("port", 4370))
                 state.location = cfg.get("location", "")
@@ -494,9 +531,14 @@ class ZKPullManager:
                             except Exception as e:
                                 logger.error(f"[PullEngine] {state.ip} — clear failed: {e}")
 
-                state.last_sync = datetime.now()
+                now_sync = datetime.now()
+                state.last_sync = now_sync
                 state.last_record_count = count
                 state.status = "online"
+                try:
+                    machines_config.update_machine_last_sync(state.sn, state.ip, state.port, now_sync.isoformat())
+                except Exception as e:
+                    logger.error(f"[PullEngine] Error saving last sync to config: {e}")
 
             except Exception as e:
                 logger.error(f"[PullEngine] {state.ip} pull failed: {e}")

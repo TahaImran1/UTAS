@@ -12,7 +12,7 @@ export default function TopBar({ isLoggedIn }) {
       case '/machines': return 'Machines'
       case '/companies': return 'Companies'
       case '/employees': return 'Employees'
-      case '/logs': return 'Attendance Logs'
+      case '/logs': return 'Logs Tracker'
       case '/master-settings': return 'Master Settings'
       default: return 'UTAS'
     }

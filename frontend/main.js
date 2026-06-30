@@ -3,7 +3,7 @@ const { autoUpdater } = require('electron-updater')
 const path = require('path')
 const fs = require('fs')
 const Store = require('electron-store')
-const { spawn, execFile } = require('child_process')
+const { spawn, execFile, execFileSync } = require('child_process')
 const os = require('os')
 
 const store = new Store()
@@ -54,6 +54,13 @@ const REQUIRED_PORTS = [
 function openFirewallPorts() {
   if (process.platform !== 'win32') return
   REQUIRED_PORTS.forEach(({ port, proto, name }) => {
+    // Delete the rule first to prevent duplicates
+    try {
+      execFileSync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${name}`], { windowsHide: true })
+    } catch (e) {
+      // Ignore if the rule did not exist
+    }
+
     const addArgs = [
       'advfirewall', 'firewall', 'add', 'rule',
       `name=${name}`, 'dir=in', 'action=allow',
@@ -171,16 +178,42 @@ app.whenReady().then(() => {
   initAutoUpdater()
 })
 
-app.on('window-all-closed', () => {
+function cleanupProcesses() {
   if (fkBridgeProcess) {
-    fkBridgeProcess.kill()
+    console.log('[Cleanup] Killing FkBridge process...')
+    try {
+      if (process.platform === 'win32') {
+        execFileSync('taskkill', ['/F', '/T', '/PID', fkBridgeProcess.pid.toString()], { windowsHide: true })
+      } else {
+        fkBridgeProcess.kill()
+      }
+    } catch (e) {
+      try { fkBridgeProcess.kill() } catch(x) {}
+    }
     fkBridgeProcess = null
   }
   if (backendProcess) {
-    backendProcess.kill()
+    console.log('[Cleanup] Killing Backend process...')
+    try {
+      if (process.platform === 'win32') {
+        execFileSync('taskkill', ['/F', '/T', '/PID', backendProcess.pid.toString()], { windowsHide: true })
+      } else {
+        backendProcess.kill()
+      }
+    } catch (e) {
+      try { backendProcess.kill() } catch(x) {}
+    }
     backendProcess = null
   }
+}
+
+app.on('window-all-closed', () => {
+  cleanupProcesses()
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('will-quit', () => {
+  cleanupProcesses()
 })
 
 app.on('activate', () => {
@@ -199,6 +232,8 @@ ipcMain.handle('get-local-ip', () => {
   }
   return '127.0.0.1'
 })
+
+ipcMain.handle('get-app-version', () => app.getVersion())
 
 // ── Auto-Updater Logic ────────────────────────────────────────────────────────
 function initAutoUpdater() {

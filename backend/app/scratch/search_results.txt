@@ -1,0 +1,5 @@
+1688: #  Offline Logs and direct download 
+1791: @app.get("/api/admin/offline-logs/download", dependencies=[Depends(get_current_user)])
+1792: def download_offline_logs(format: str = "csv"):
+1829: @app.get("/pull/machines/{sn}/download-logs", dependencies=[Depends(get_current_user)])
+1830: def download_device_logs(sn: str, format: str = "csv"):

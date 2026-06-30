@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Security Incident & Audit Report</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #1e293b;
+            --primary-light: #334155;
+            --accent: #2563eb;
+            --accent-light: #dbeafe;
+            --text-dark: #0f172a;
+            --text-muted: #475569;
+            --bg-light: #f8fafc;
+            --border: #e2e8f0;
+            --danger: #dc2626;
+            --danger-light: #fee2e2;
+            --success: #16a34a;
+            --success-light: #dcfce7;
+            --warning: #ca8a04;
+            --warning-light: #fef9c3;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            color: var(--text-dark);
+            background-color: var(--bg-light);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        header {
+            background-color: var(--primary);
+            color: #ffffff;
+            padding: 2.5rem;
+            position: relative;
+        }
+
+        .header-grid {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .header-title h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.025em;
+        }
+
+        .header-title p {
+            color: #94a3b8;
+            font-size: 1.1rem;
+        }
+
+        .header-badge {
+            background-color: var(--success);
+            color: white;
+            padding: 0.4rem 0.8rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 2rem;
+            border-top: 1px solid #334155;
+            padding-top: 1.5rem;
+            font-size: 0.9rem;
+        }
+
+        .meta-item span {
+            display: block;
+            color: #94a3b8;
+            font-weight: 500;
+            margin-bottom: 0.2rem;
+        }
+
+        .meta-item p {
+            color: #f1f5f9;
+            font-weight: 600;
+        }
+
+        .content {
+            padding: 2.5rem;
+        }
+
+        h2 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0.5rem;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: var(--text-muted);
+        }
+
+        .alert {
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid;
+            font-size: 0.95rem;
+        }
+
+        .alert-danger {
+            background-color: var(--danger-light);
+            border-left-color: var(--danger);
+            color: #7f1d1d;
+        }
+
+        .alert-success {
+            background-color: var(--success-light);
+            border-left-color: var(--success);
+            color: #14532d;
+        }
+
+        .alert-warning {
+            background-color: var(--warning-light);
+            border-left-color: var(--warning);
+            color: #713f12;
+        }
+
+        .card {
+            background: var(--bg-light);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .card-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 0.8rem;
+            color: var(--primary-light);
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: #f1f5f9;
+            color: var(--danger);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        pre {
+            background-color: var(--primary);
+            color: #f8fafc;
+            padding: 1.2rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            border-left: 4px solid var(--accent);
+        }
+
+        pre code {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: transparent;
+            color: #f8fafc;
+            padding: 0;
+            font-size: 0.9rem;
+        }
+
+        .command-desc {
+            font-size: 0.95rem;
+            margin-top: 0.5rem;
+            color: var(--text-muted);
+        }
+
+        .command-desc strong {
+            color: var(--text-dark);
+        }
+
+        .btn-print {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.8rem 1.5rem;
+            border-radius: 9999px;
+            font-weight: 600;
+            font-family: 'Outfit', sans-serif;
+            box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.4);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s;
+            z-index: 100;
+        }
+
+        .btn-print:hover {
+            background-color: #1d4ed8;
+            transform: translateY(-2px);
+        }
+
+        @media print {
+            body {
+                background-color: white;
+                padding: 0;
+            }
+
+            .container {
+                box-shadow: none;
+                border: none;
+                max-width: 100%;
+            }
+
+            .btn-print {
+                display: none !important;
+            }
+
+            h2 {
+                page-break-after: avoid;
+            }
+
+            .card {
+                page-break-inside: avoid;
+            }
+
+            pre {
+                page-break-inside: avoid;
+                background-color: #f1f5f9 !important;
+                color: #0f172a !important;
+                border: 1px solid #cbd5e1 !important;
+                white-space: pre-wrap; /* Ensure commands wrap on narrow print layouts */
+            }
+
+            pre code {
+                color: #0f172a !important;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <button class="btn-print" onclick="window.print()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+        Print Report / Save PDF
+    </button>
+
+    <div class="container">
+        <header>
+            <div class="header-grid">
+                <div class="header-title">
+                    <h1>Security Incident &amp; Audit Report</h1>
+                    <p>High CPU Spike &amp; Firewall Hardening Log</p>
+                </div>
+                <span class="header-badge">RESOLVED</span>
+            </div>
+            
+            <div class="meta-grid">
+                <div class="meta-item">
+                    <span>AFFECTED SERVER</span>
+                    <p>ITVS (Windows Server 2022)</p>
+                </div>
+                <div class="meta-item">
+                    <span>INCIDENT DATE</span>
+                    <p>June 16, 2026 — 4:00 AM</p>
+                </div>
+                <div class="meta-item">
+                    <span>AUDIT DATE</span>
+                    <p>June 20, 2026</p>
+                </div>
+            </div>
+        </header>
+
+        <div class="content">
+            
+            <h2>1. Incident Summary</h2>
+            <div class="alert alert-danger">
+                <strong>Root Cause Summary:</strong> The server was placed in the DMZ (or port range forwarding was configured) on the router on June 15, exposing all internal ports to the public internet. Because the Windows Firewall was disabled (pre-existing condition), automated internet scanners targeted a vulnerability in <strong>Oracle WebLogic (Port 7001)</strong> on June 16 at 4:00 AM, dropping a renamed <strong>XMRig Monero Miner (v6.21.2)</strong>.
+            </div>
+            <p>
+                The malware established persistence by creating a registry-based Windows Service named <code>JavaSE</code>. The service launched a renamed copy of <strong>NSSM (Non-Sucking Service Manager)</strong> from <code>AppData\Roaming\Sun\Java\Deployment\java.exe</code>, which spawned the actual XMRig CPU miner renamed as <code>java.exe</code> at <code>AppData\LocalLow\Sun\Java\Deployment\java.exe</code>, causing a 90%+ CPU utilization spike.
+            </p>
+
+            <h2>2. Diagnostic &amp; Discovery Commands</h2>
+            <p>The following commands were utilized to inspect process information and verify the security status of the server:</p>
+
+            <div class="card">
+                <div class="card-title">Identify Active Modules &amp; Bitness Mismatch</div>
+                <p>Used to verify if the spinning process was a legitimate JVM (by checking if the Java Virtual Machine DLL is loaded) or a fake binary:</p>
+                <pre><code>Get-Process -Id &lt;PID&gt; | Select-Object -ExpandProperty Modules | Where-Object {$_.ModuleName -like "*jvm.dll*"} | Select-Object FileName</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Searches the loaded DLLs of the target process ID. If it returns blank, it confirms the binary is not a real Java Virtual Machine.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Check Security Auditing Status</div>
+                <p>Used to verify whether Windows was logging administrative and firewall changes to the Security log:</p>
+                <pre><code>auditpol /get /subcategory:"MPSSVC Rule-Level Policy Change"</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Checks if the subcategory policy is set to "Auditing" or "No Auditing". (It was set to <code>No Auditing</code> on the server).</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Check Firewall Service Controls (System Log)</div>
+                <p>Used to search for Service Control events related to the Windows Defender Firewall service starting or stopping:</p>
+                <pre><code>Get-EventLog -LogName System -Source "Service Control Manager" -ErrorAction SilentlyContinue | Where-Object {$_.Message -like "*Windows Defender Firewall*"} | Select-Object TimeGenerated, Message</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Searches the System logs for service controller events targeting the firewall service.</div>
+            </div>
+
+            <h2>3. Remediation &amp; Cleanup Commands</h2>
+            <p>The following commands were executed to terminate the active malware, delete the persistent service, and clean up the malicious files:</p>
+
+            <div class="card">
+                <div class="card-title">1. Terminate Malicious Processes</div>
+                <pre><code>Stop-Process -Id 3216 -Force
+Stop-Process -Id 8328 -Force</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Instantly stops the parent service manager (3216) and the child miner (8328), dropping CPU usage back to normal.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">2. Delete the Persistent Windows Service</div>
+                <pre><code>Remove-Item -Path "HKLM:\System\CurrentControlSet\Services\JavaSE" -Recurse -Force</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Deletes the service configuration key directly from the registry, preventing the malware from restarting on reboot (bypassing SCM access denial).</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">3. Remove Fake Binary Files</div>
+                <pre><code>Remove-Item -Path "C:\Users\Administrator\AppData\Roaming\Sun\Java\Deployment\java.exe" -Force
+Remove-Item -Path "C:\Users\Administrator\AppData\LocalLow\Sun\Java\Deployment\java.exe" -Force</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Deletes the masquerading service manager and miner executables from the user AppData directories.</div>
+            </div>
+
+            <h2>4. Security Hardening &amp; Monitoring Setup</h2>
+            <p>The following commands were run to enable defensive structures on the server and monitor future activity:</p>
+
+            <div class="card">
+                <div class="card-title">Enable Windows Defender Firewall</div>
+                <pre><code>Set-NetFirewallProfile -All -Enabled True</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Turns the Windows Defender Firewall ON for all network profiles (Domain, Private, and Public). This immediately blocked public access to WebLogic (7001) and Oracle Database (1522).</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Enable Firewall Policy Security Auditing</div>
+                <pre><code>auditpol /set /subcategory:"MPSSVC Rule-Level Policy Change" /success:enable /failure:enable</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Configures Windows to write an audit log entry to the Security Event Log every time the firewall status is toggled or rules are altered.</div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">Query Security Audit Logs for Firewall Changes</div>
+                <pre><code>Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4950} -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, Message | Format-List</code></pre>
+                <div class="command-desc"><strong>What it does:</strong> Pulls and displays the log history of firewall toggles (Event ID 4950). Verified successfully when testing the firewall state changes.</div>
+            </div>
+
+            <h2>5. Recommended Network Configuration</h2>
+            <div class="alert alert-success">
+                <strong>Status Update:</strong> The firewall has successfully closed WebLogic (7001) and Oracle XE (1522) from the internet. However, Port 1521 (Oracle DB) and Port 3389 (RDP) remain open because of active router forwarding rules.
+            </div>
+            <p>
+                To complete the server hardening, configure the router settings to ensure maximum isolation:
+            </p>
+            <ul>
+                <li><strong>Disable DMZ</strong> entirely on the router.</li>
+                <li>Set specific port forwarding rules mapping <strong>only Port 4370 (TCP and UDP)</strong> to the server for ZKTeco syncing.</li>
+                <li><strong>Remove/Delete</strong> any router rules forwarding <code>3389</code> (RDP), <code>1521</code> (Oracle Database), <code>8888</code>, and <code>8085</code> (Tomcat) to the public internet.</li>
+                <li>Utilize a secure, encrypted peer-to-peer VPN (e.g., <strong>Tailscale</strong>) for RDP/Database connections rather than exposing ports directly.</li>
+            </ul>
+
+        </div>
+    </div>
+</body>
+</html>

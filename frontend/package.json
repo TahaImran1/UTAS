@@ -1,6 +1,6 @@
 {
   "name": "utas-desktop",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "UTAS — Unified Time Attendance System Desktop App",
   "main": "main.js",
   "scripts": {
@@ -15,8 +15,9 @@
     "appId": "com.utas.desktop",
     "productName": "UTAS Desktop",
     "publish": {
-      "provider": "generic",
-      "url": "https://YOUR_USERNAME.github.io/utas-updates/"
+      "provider": "github",
+      "owner": "TahaImran1",
+      "repo": "UTAS"
     },
     "directories": {
       "output": "dist-final"

@@ -16,6 +16,13 @@ export default function MasterSettings() {
   const [errorMsg, setErrorMsg] = useState('')
 
   const isElectron = !!window.electronAPI
+  const [currentVersion, setCurrentVersion] = useState('')
+
+  useEffect(() => {
+    if (isElectron && window.electronAPI?.getAppVersion) {
+      window.electronAPI.getAppVersion().then(v => setCurrentVersion(v))
+    }
+  }, [isElectron])
 
   useEffect(() => {
     if (!isElectron) return
@@ -224,7 +231,7 @@ export default function MasterSettings() {
             <MdSystemUpdateAlt /> Application Updates
           </h3>
           <p style={{ color: 'var(--color-text-muted)', fontSize: '0.85rem', marginBottom: '20px' }}>
-            Check for new versions and install updates directly from the update server.
+            Check for new versions and install updates directly from the update server.{currentVersion && <span> Current Version: <strong>v{currentVersion}</strong></span>}
           </p>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>

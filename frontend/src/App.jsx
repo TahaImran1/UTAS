@@ -33,14 +33,10 @@ export default function App() {
       setInitialized(res.data.initialized)
       setLockout(res.data.lockout || false)
       setIsLoggedIn(res.data.logged_in)
-    } catch (err) {
-      console.error('Auth check failed:', err)
-      // Default fallback
-      setInitialized(true)
-      setLockout(false)
-      setIsLoggedIn(false)
-    } finally {
       setLoading(false)
+    } catch (err) {
+      console.warn('Auth check failed (backend might still be booting up), retrying in 1s...', err)
+      setTimeout(checkAuth, 1000)
     }
   }
 

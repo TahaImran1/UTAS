@@ -464,8 +464,13 @@ def process_attendance_data(sn: str, raw_data: str):
             db.insert_log_generic(records, sn, company_names)
             log(f"Saved {count} records to databases.")
             if sn in pull_manager._machines:
-                pull_manager._machines[sn].last_sync = datetime.datetime.now()
+                now_sync = datetime.datetime.now()
+                pull_manager._machines[sn].last_sync = now_sync
                 pull_manager._machines[sn].last_record_count = count
+                try:
+                    machines_config.update_machine_last_sync(sn, "", 0, now_sync.isoformat())
+                except Exception as e:
+                    log(f"Error saving last sync to config: {e}")
         except Exception as e:
             log(f"DB error: {e}")
             raise e
@@ -1512,65 +1517,34 @@ async def get_attendance_logs(
     limit: int = Query(200, description="Max rows to return")
 ):
     """
-    Query attendance logs from database.
-    Used by the Attendance Logs page in the desktop app.
+    Read pull execution history from local JSON tracker file.
+    Used by the Logs Tracker page.
     """
-    if not db:
-        raise HTTPException(status_code=503, detail="Database module not available")
-    try:
-        db_type = db.get_active_db_type()
-        config = db.load_latest_config(db_type)
-        if db_type == "Oracle":
-            conn = db.connect_db_oracle(config)
-        else:
-            conn = db.connect_db_postgresql(config)
-        cursor = conn.cursor()
-
-        table    = config["table"]
-        col_emp  = config["column1"]
-        col_time = config["column2"]
-        col_mach = config["column3"]
-
-        query = f"SELECT {col_emp}, {col_time}, {col_mach} FROM {table}"
-        params = {}
-        conditions = []
-
-        if date:
-            if db_type == "Oracle":
-                conditions.append(f"TRUNC({col_time}) = TO_DATE(:date_val, 'YYYY-MM-DD')")
-            else:
-                conditions.append(f"DATE({col_time}) = %(date_val)s::DATE")
-            params["date_val"] = date
-        if sn:
-            if db_type == "Oracle":
-                conditions.append(f"{col_mach} LIKE :sn_val")
-            else:
-                conditions.append(f"{col_mach} LIKE %(sn_val)s")
-            params["sn_val"] = f"%{sn}%"
-
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+    if not db or not hasattr(db, "PULL_HISTORY_FILE"):
+        raise HTTPException(status_code=503, detail="Database module not initialized")
+        
+    history = []
+    if os.path.exists(db.PULL_HISTORY_FILE):
+        try:
+            with open(db.PULL_HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading pull_history.json: {e}")
             
-        if db_type == "Oracle":
-            query += f" ORDER BY {col_time} DESC FETCH FIRST :limit ROWS ONLY"
-        else:
-            query += f" ORDER BY {col_time} DESC LIMIT %(limit)s"
-        params["limit"] = limit
-
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        return [
-            {"user_id": r[0], "timestamp": str(r[1]), "machine": r[2]}
-            for r in rows
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    filtered = []
+    for entry in history:
+        # Date filter (entry["date"] is YYYY-MM-DD HH:MM:SS)
+        if date and not entry.get("date", "").startswith(date):
+            continue
+        # SN/Device filter
+        if sn and sn.lower() not in entry.get("machine", "").lower():
+            continue
+        filtered.append(entry)
+        
+    return filtered[:limit]
 
 
-# â”€â”€ Device management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Device management ────────────────────────────────────────────────────────
 
 @app.get("/pull/device-info/{sn}", dependencies=[Depends(get_current_user)])
 def device_info(sn: str):
@@ -1679,6 +1653,388 @@ async def dashboard_stats():
         "recent_push_logs": len(RECENT_LOGS),
         "sync_interval_seconds": int(os.getenv("PULL_SYNC_INTERVAL", "20")),
     }
+
+
+# ── Offline Logs and direct download ──────────────────────────────────────────
+
+@app.get("/api/admin/offline-logs/status", dependencies=[Depends(get_current_user)])
+def get_offline_logs_status():
+    count = 0
+    if db and hasattr(db, "OFFLINE_LOGS_FILE") and os.path.exists(db.OFFLINE_LOGS_FILE):
+        try:
+            with open(db.OFFLINE_LOGS_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+                count = len(logs)
+        except Exception as e:
+            logger.error(f"Error reading offline logs status: {e}")
+    return {"count": count, "has_offline_logs": count > 0}
+
+@app.post("/api/admin/offline-logs/sync", dependencies=[Depends(get_current_user)])
+def sync_offline_logs():
+    if not db or not hasattr(db, "OFFLINE_LOGS_FILE"):
+        raise HTTPException(status_code=503, detail="Database module not initialized")
+        
+    if not os.path.exists(db.OFFLINE_LOGS_FILE):
+        return {"success": True, "synced": 0, "message": "No offline logs to sync."}
+        
+    try:
+        with open(db.OFFLINE_LOGS_FILE, "r", encoding="utf-8") as f:
+            all_logs = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading offline logs: {e}")
+        
+    if not all_logs:
+        return {"success": True, "synced": 0, "message": "No offline logs to sync."}
+        
+    class OfflineRecord:
+        def __init__(self, user_id, timestamp):
+            self.user_id = user_id
+            if isinstance(timestamp, str):
+                try:
+                    self.timestamp = datetime.datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    self.timestamp = timestamp
+            else:
+                self.timestamp = timestamp
+
+    # Group by machine
+    grouped = {}
+    for log_entry in all_logs:
+        m = log_entry.get("machine")
+        if m not in grouped:
+            grouped[m] = []
+        grouped[m].append(log_entry)
+        
+    remaining_logs = []
+    synced_count = 0
+    errors = []
+    
+    for machine_ref, logs_in_group in grouped.items():
+        state = pull_manager.get_machine(sn=machine_ref) or pull_manager.get_machine(ip=machine_ref)
+        company_names = []
+        if state:
+            company_names = state.get("company_names") or []
+        else:
+            try:
+                all_machines = machines_config.load_machines()
+                for m_cfg in all_machines:
+                    if m_cfg.get("sn") == machine_ref or m_cfg.get("ip") == machine_ref:
+                        company_names = m_cfg.get("company_names") or []
+                        if not company_names and m_cfg.get("company_name"):
+                            company_names = [m_cfg.get("company_name")]
+                        break
+            except Exception as cfg_err:
+                logger.error(f"Error loading machines config during sync: {cfg_err}")
+                
+        if not company_names:
+            remaining_logs.extend(logs_in_group)
+            errors.append(f"No company assigned to machine {machine_ref}")
+            continue
+            
+        records = [OfflineRecord(l["user_id"], l["timestamp"]) for l in logs_in_group]
+        try:
+            db.insert_log_generic(records, machine_ref, company_names, bypass_offline_save=True)
+            synced_count += len(records)
+        except Exception as e:
+            remaining_logs.extend(logs_in_group)
+            errors.append(f"Machine {machine_ref} sync failed: {str(e)}")
+            
+    # Save remaining logs back to file
+    try:
+        if remaining_logs:
+            with open(db.OFFLINE_LOGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(remaining_logs, f, indent=4)
+        else:
+            if os.path.exists(db.OFFLINE_LOGS_FILE):
+                os.remove(db.OFFLINE_LOGS_FILE)
+    except Exception as e:
+        logger.error(f"Error updating offline logs file: {e}")
+        errors.append(f"Failed to update local storage: {e}")
+        
+    return {
+        "success": len(errors) == 0,
+        "synced": synced_count,
+        "remaining": len(remaining_logs),
+        "errors": errors
+    }
+
+@app.get("/api/admin/offline-logs/download", dependencies=[Depends(get_current_user)])
+def download_offline_logs(format: str = "csv"):
+    if not db or not hasattr(db, "OFFLINE_LOGS_FILE") or not os.path.exists(db.OFFLINE_LOGS_FILE):
+        raise HTTPException(status_code=404, detail="No offline logs found")
+        
+    try:
+        with open(db.OFFLINE_LOGS_FILE, "r", encoding="utf-8") as f:
+            logs = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading offline logs: {e}")
+        
+    if not logs:
+        raise HTTPException(status_code=404, detail="No offline logs found")
+        
+    import io
+    import csv
+    
+    output = io.StringIO()
+    if format == "txt":
+        writer = csv.writer(output, delimiter="\t")
+        writer.writerow(["User ID", "Timestamp", "Machine"])
+        for l in logs:
+            writer.writerow([l.get("user_id"), l.get("timestamp"), l.get("machine")])
+        content = output.getvalue()
+        filename = f"offline_logs_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        media_type = "text/plain"
+    else:
+        writer = csv.writer(output)
+        writer.writerow(["User ID", "Timestamp", "Machine"])
+        for l in logs:
+            writer.writerow([l.get("user_id"), l.get("timestamp"), l.get("machine")])
+        content = output.getvalue()
+        filename = f"offline_logs_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        media_type = "text/csv"
+        
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    return Response(content=content, media_type=media_type, headers=headers)
+
+@app.get("/pull/machines/{sn}/download-logs", dependencies=[Depends(get_current_user)])
+def download_device_logs(sn: str, format: str = "csv"):
+    import fk_bridge_client
+    from fk_bridge_client import is_fk_driver
+    
+    # 1. Find the machine state
+    machine_state = pull_manager._find_state(sn=sn, ip="", port=4370)
+    if not machine_state:
+        raise HTTPException(status_code=404, detail="Machine not found")
+        
+    machine_ref = machine_state.get_machine_ref()
+    records = []
+    source_name = ""
+    
+    if machine_state.protocol == "HTTP":
+        # For HTTP push, we read from the database logs already uploaded
+        if not db:
+            raise HTTPException(status_code=503, detail="Database module not available")
+        try:
+            db_type = db.get_active_db_type()
+            config = db.load_latest_config(db_type)
+            if db_type == "Oracle":
+                conn = db.connect_db_oracle(config)
+            else:
+                conn = db.connect_db_postgresql(config)
+            cursor = conn.cursor()
+            
+            table = config["table"]
+            col_time = config["column2"]
+            col_mach = config["column3"]
+            col_uid = config["column1"]
+            
+            if db_type == "Oracle":
+                query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = :sn ORDER BY "{col_time}" DESC'
+                cursor.execute(query, {"sn": sn})
+            else:
+                query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = %(sn)s ORDER BY "{col_time}" DESC'
+                cursor.execute(query, {"sn": sn})
+                
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            for r in rows:
+                records.append({"user_id": r[0], "timestamp": r[1]})
+            source_name = f"db_cache_{sn}"
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+    else:
+        # For TCP pull (ZK or FK), pull directly from the device
+        with machine_state.lock:
+            try:
+                if is_fk_driver(machine_state.driver):
+                    if not machine_state.fk_connected and not pull_manager._connect(machine_state):
+                        raise RuntimeError(machine_state.last_error or "Connection failed")
+                    pulled_records, err = fk_bridge_client.pull_attendance(machine_state.ip, machine_state.port, machine_state.config)
+                    if err:
+                        raise RuntimeError(err)
+                    for r in pulled_records:
+                        ts = getattr(r, 'timestamp', None) or getattr(r, 'check_time', None)
+                        ts_str = ts.strftime('%Y-%m-%d %H:%M:%S') if isinstance(ts, datetime.datetime) else str(ts)
+                        uid = getattr(r, 'user_id', None) or getattr(r, 'uid', None) or getattr(r, 'pin', None)
+                        records.append({"user_id": str(uid), "timestamp": ts_str})
+                else:
+                    if not machine_state.conn or not machine_state.conn.is_connect:
+                        if not pull_manager._connect(machine_state):
+                            raise RuntimeError(machine_state.last_error or "Connection failed")
+                    pulled_records = machine_state.conn.get_attendance()
+                    for r in pulled_records:
+                        ts_str = r.timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(r.timestamp, datetime.datetime) else str(r.timestamp)
+                        records.append({"user_id": str(r.user_id), "timestamp": ts_str})
+                source_name = f"device_{sn}"
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to pull logs from device: {e}")
+                
+    if not records:
+        raise HTTPException(status_code=404, detail="No logs found for this machine")
+        
+    import io
+    import csv
+    
+    output = io.StringIO()
+    if format == "txt":
+        writer = csv.writer(output, delimiter="\t")
+        writer.writerow(["User ID", "Timestamp", "Machine"])
+        for r in records:
+            writer.writerow([r.get("user_id"), r.get("timestamp"), machine_ref])
+        content = output.getvalue()
+        filename = f"{source_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        media_type = "text/plain"
+    else:
+        writer = csv.writer(output)
+        writer.writerow(["User ID", "Timestamp", "Machine"])
+        for r in records:
+            writer.writerow([r.get("user_id"), r.get("timestamp"), machine_ref])
+        content = output.getvalue()
+        filename = f"{source_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        media_type = "text/csv"
+        
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
+from fastapi import UploadFile, File
+
+@app.post("/api/admin/companies/{company_name}/upload-logs", dependencies=[Depends(get_current_user)])
+async def upload_company_logs(company_name: str, file: UploadFile = File(...)):
+    if not db:
+        raise HTTPException(status_code=503, detail="Database module not available")
+        
+    mappings = db.load_company_mappings()
+    profile_name = mappings.get(company_name)
+    if not profile_name or profile_name == "None":
+        raise HTTPException(status_code=400, detail=f"Company '{company_name}' has no database profile assigned. Please configure mapping first.")
+        
+    try:
+        contents = await file.read()
+        text = contents.decode("utf-8-sig", errors="ignore")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
+        
+    # Split into lines and filter empty
+    raw_lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not raw_lines:
+        raise HTTPException(status_code=400, detail="The file is empty")
+        
+    # Detect separator
+    sep = "\t" if file.filename.endswith(".txt") or "\t" in raw_lines[0] else ","
+    
+    import csv
+    import io
+    reader = csv.reader(io.StringIO(text), delimiter=sep)
+    rows = [r for r in reader if r]
+    if not rows:
+        raise HTTPException(status_code=400, detail="No rows found in file")
+        
+    # Check for header
+    is_header = False
+    first_row = rows[0]
+    if len(first_row) > 1:
+        val0 = first_row[0].strip().lower()
+        val1 = first_row[1].strip().lower()
+        if "user" in val0 or "id" in val0 or "emp" in val0 or "time" in val1 or "date" in val1 or "mach" in val0:
+            is_header = True
+            
+    header = [h.strip().lower() for h in first_row]
+    user_idx = -1
+    time_idx = -1
+    mach_idx = -1
+    
+    if is_header:
+        for idx, name in enumerate(header):
+            if "user" in name or "emp" in name or name == "uid" or name == "id":
+                user_idx = idx
+            elif "time" in name or "date" in name or name == "ts":
+                time_idx = idx
+            elif "mach" in name or "device" in name or name == "ref":
+                mach_idx = idx
+                
+    # Resolve mapped machines for this company to get their reference names
+    mapped_refs = []
+    for m in pull_manager._machines.values():
+        if company_name in m.company_names:
+            mapped_refs.append(m.get_machine_ref())
+            
+    # Detect if serial number of any mapped machine is in the filename
+    filename_lower = file.filename.lower()
+    resolved_from_filename = None
+    for m in pull_manager._machines.values():
+        if m.sn and m.sn in filename_lower:
+            resolved_from_filename = m.get_machine_ref()
+            break
+            
+    default_mach_ref = resolved_from_filename or (mapped_refs[0] if len(mapped_refs) == 1 else "Uploaded File")
+
+    # Fallbacks
+    if user_idx == -1:
+        user_idx = 0
+    if time_idx == -1:
+        time_idx = 1
+        
+    from collections import defaultdict, namedtuple
+    UploadedRecord = namedtuple("UploadedRecord", ["user_id", "timestamp"])
+    grouped_records = defaultdict(list)
+    
+    start_row = 1 if is_header else 0
+    for row_num, r in enumerate(rows[start_row:], start=start_row+1):
+        if len(r) <= max(user_idx, time_idx):
+            continue
+            
+        uid = r[user_idx].strip()
+        ts_str = r[time_idx].strip()
+        if not uid or not ts_str:
+            continue
+            
+        try:
+            ts = None
+            # Standard formats: YYYY-MM-DD HH:MM:SS, etc.
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    ts = datetime.datetime.strptime(ts_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if not ts:
+                ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
+            
+        mach = default_mach_ref
+        if mach_idx != -1 and len(r) > mach_idx:
+            mach = r[mach_idx].strip() or default_mach_ref
+            
+        grouped_records[mach].append(UploadedRecord(user_id=uid, timestamp=ts))
+        
+    total_parsed = sum(len(recs) for recs in grouped_records.values())
+    if total_parsed == 0:
+        raise HTTPException(status_code=400, detail="No valid records could be parsed. Check columns (User ID, Timestamp).")
+        
+    # Now execute inserts group by group
+    total_inserted = 0
+    errors = []
+    
+    for mach_ref, recs in grouped_records.items():
+        try:
+            # We bypass offline save so that we raise database errors to the user
+            db.insert_log_generic(recs, mach_ref, [company_name], bypass_offline_save=True)
+            total_inserted += len(recs)
+        except Exception as e:
+            errors.append(f"Batch for machine '{mach_ref}' failed: {e}")
+            
+    if errors:
+        raise HTTPException(status_code=500, detail="; ".join(errors))
+        
+    return {
+        "success": True,
+        "message": f"Successfully parsed {total_parsed} records and inserted {total_inserted} records."
+    }
+
 
 
 # â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

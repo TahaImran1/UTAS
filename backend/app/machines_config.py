@@ -1,4 +1,4 @@
-﻿"""
+"""
 machines_config.py
 ------------------
 CRUD helper for machines.json.
@@ -112,4 +112,27 @@ def get_machine(sn: str = "", ip: str = "", port: int = 4370) -> dict | None:
         if not sn and m.get("ip") == ip and int(m.get("port", 4370)) == port:
             return m
     return None
+
+
+def update_machine_last_sync(sn: str, ip: str, port: int, last_sync_iso: str) -> bool:
+    """Update last_sync field for a machine in machines.json."""
+    machines = load_machines()
+    updated = False
+    for i, m in enumerate(machines):
+        if sn and m.get("sn") == sn:
+            machines[i]["last_sync"] = last_sync_iso
+            updated = True
+            break
+        elif not sn and m.get("ip") == ip and int(m.get("port", 4370)) == port:
+            machines[i]["last_sync"] = last_sync_iso
+            updated = True
+            break
+    if updated:
+        try:
+            _save_machines(machines)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving updated sync time to machines.json: {e}")
+    return False
+
 

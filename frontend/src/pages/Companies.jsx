@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   MdBusiness, MdSearch, MdAdd, MdCheck, MdClose, MdLinkOff,
-  MdStorage, MdDelete, MdInfoOutline, MdDevices
+  MdStorage, MdDelete, MdInfoOutline, MdDevices, MdCloudUpload
 } from 'react-icons/md'
 import {
   getCompanies,
@@ -11,7 +11,8 @@ import {
   mapCompanyToDb,
   getCompanyMappings,
   getDbProfiles,
-  addMachine
+  addMachine,
+  uploadCompanyLogs
 } from '../api/client'
 import toast from 'react-hot-toast'
 
@@ -33,6 +34,8 @@ export default function Companies() {
   const [selectedSNS, setSelectedSNS] = useState([])
   const [saving, setSaving] = useState(false)
   const [confirmModal, setConfirmModal] = useState(null)
+  const [uploadingCompany, setUploadingCompany] = useState(null)
+  const [uploadFile, setUploadFile] = useState(null)
   
   const resetFocus = () => {
     if (document.activeElement && typeof document.activeElement.blur === 'function') {
@@ -220,6 +223,32 @@ export default function Companies() {
     }
   }
 
+  const handleUploadFile = async () => {
+    if (!uploadFile || !uploadingCompany) return
+    
+    setSaving(true)
+    const t = toast.loading(`Uploading and syncing logs for ${uploadingCompany.name}...`)
+    try {
+      const formData = new FormData()
+      formData.append('file', uploadFile)
+      
+      const res = await uploadCompanyLogs(uploadingCompany.name, formData)
+      if (res.data.success) {
+        toast.success(res.data.message || 'Logs successfully uploaded and synced!', { id: t })
+        setUploadingCompany(null)
+        setUploadFile(null)
+        fetchData()
+      } else {
+        toast.error(res.data.message || 'Upload failed', { id: t })
+      }
+    } catch (e) {
+      const errMsg = e.response?.data?.detail || String(e)
+      toast.error(`Upload failed: ${errMsg}`, { id: t })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const filteredCompanies = companyStats.filter(c =>
     c.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
@@ -304,12 +333,22 @@ export default function Companies() {
                 </div>
               )}
 
-              <div className="machine-card-actions">
-                <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={() => setManageCompany(c)}>
+              <div className="machine-card-actions" style={{ display: 'flex', gap: '5px' }}>
+                <button className="btn btn-ghost btn-sm" style={{ flex: '1 1 30%' }} onClick={() => setManageCompany(c)}>
                   <MdDevices /> Devices
+                </button>
+                <button 
+                  className="btn btn-ghost btn-sm" 
+                  style={{ flex: '1 1 50%', padding: '4px 6px' }} 
+                  title="Upload CSV/TXT Logs" 
+                  onClick={() => setUploadingCompany(c)}
+                  disabled={c.dbProfile === 'None'}
+                >
+                  <MdCloudUpload /> Upload Logs
                 </button>
                 <button
                   className="btn btn-ghost btn-sm btn-delete-company"
+                  style={{ flex: '1 1 15%' }}
                   title="Delete Company"
                   onClick={() => handleDeleteCompany(c.name)}
                 >
@@ -507,6 +546,53 @@ export default function Companies() {
                 confirmModal.onConfirm();
                 setConfirmModal(null);
               }}>Confirm</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload Logs Modal */}
+      {uploadingCompany && (
+        <div className="modal-overlay">
+          <div className="modal" style={{ maxWidth: '450px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h2>Upload Logs to {uploadingCompany.name}</h2>
+              <MdClose style={{ cursor: 'pointer' }} onClick={() => { setUploadingCompany(null); setUploadFile(null); }} />
+            </div>
+            
+            <p style={{ fontSize: '13px', color: 'var(--color-text-muted)', marginBottom: '15px' }}>
+              Select a CSV or TXT file to manually insert attendance logs into the database profile: <strong>{uploadingCompany.dbProfile}</strong>.
+            </p>
+
+            <div style={{ background: 'var(--color-bg-alt, rgba(255,255,255,0.02))', border: '1px dashed var(--color-border)', borderRadius: '8px', padding: '30px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
+              <MdCloudUpload size={48} color="var(--color-accent)" />
+              <button 
+                className="btn btn-secondary btn-sm"
+                onClick={() => document.getElementById('company-file-upload-input').click()}
+              >
+                Choose CSV/TXT File
+              </button>
+              <span style={{ fontSize: '12px', color: 'var(--color-text-muted)', textAlign: 'center', wordBreak: 'break-all' }}>
+                {uploadFile ? `Selected: ${uploadFile.name}` : 'No file chosen (Supports CSV/TXT)'}
+              </span>
+              <input 
+                id="company-file-upload-input"
+                type="file"
+                accept=".csv,.txt"
+                onChange={(e) => setUploadFile(e.target.files[0])}
+                style={{ display: 'none' }}
+              />
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => { setUploadingCompany(null); setUploadFile(null); }}>Cancel</button>
+              <button 
+                className="btn btn-primary" 
+                onClick={handleUploadFile} 
+                disabled={saving || !uploadFile}
+              >
+                {saving ? 'Uploading...' : 'Upload & Sync'}
+              </button>
             </div>
           </div>
         </div>
