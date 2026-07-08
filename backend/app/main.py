@@ -141,6 +141,11 @@ class PathNormalizerMiddleware:
                 scope = dict(scope)
                 scope["path"] = "/iclock/cdata"
                 scope["raw_path"] = b"/iclock/cdata"
+            elif path.lower().startswith("/iclock/") and any(path.lower().endswith(ext) for ext in (".aspx", ".asp", ".php")):
+                clean_path = path[:path.rfind(".")]
+                scope = dict(scope)
+                scope["path"] = clean_path
+                scope["raw_path"] = clean_path.encode("utf-8")
         await self.app(scope, receive, send)
 
 app.add_middleware(PathNormalizerMiddleware)
@@ -910,6 +915,36 @@ async def get_request(request: Request, SN: Optional[str] = Query(None)):
 async def device_cmd(request: Request, SN: Optional[str] = Query(None)):
     body = await request.body()
     log(f"Device {SN} cmd result: {body.decode(errors='ignore').strip()}")
+    return "OK"
+
+
+@app.api_route("/iclock/registry", methods=["GET", "POST"], response_class=PlainTextResponse)
+async def device_registry(request: Request, SN: Optional[str] = Query(None)):
+    ip = request.client.host
+    dev_id = request.headers.get("dev_id") or SN
+    if dev_id:
+        register_push_device(dev_id, ip, fk_protocol=False)
+        log(f"[ADMS REGISTRY] Registered {dev_id} from {ip}")
+    return "RegistryCode=OK"
+
+
+@app.api_route("/iclock/ping", methods=["GET", "POST"], response_class=PlainTextResponse)
+async def device_ping(request: Request, SN: Optional[str] = Query(None)):
+    ip = request.client.host
+    dev_id = request.headers.get("dev_id") or SN
+    if dev_id:
+        register_push_device(dev_id, ip, fk_protocol=False)
+        log(f"[ADMS PING] Ping from {dev_id} at {ip}")
+    return "OK"
+
+
+@app.api_route("/iclock/push", methods=["GET", "POST"], response_class=PlainTextResponse)
+async def device_push(request: Request, SN: Optional[str] = Query(None)):
+    ip = request.client.host
+    dev_id = request.headers.get("dev_id") or SN
+    if dev_id:
+        register_push_device(dev_id, ip, fk_protocol=False)
+        log(f"[ADMS PUSH] Push from {dev_id} at {ip}")
     return "OK"
 
 

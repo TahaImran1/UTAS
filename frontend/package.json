@@ -1,6 +1,6 @@
 {
   "name": "utas-desktop",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "UTAS — Unified Time Attendance System Desktop App",
   "main": "main.js",
   "scripts": {
