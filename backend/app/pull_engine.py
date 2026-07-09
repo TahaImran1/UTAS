@@ -437,7 +437,8 @@ class ZKPullManager:
             logger.warning(f"[PullEngine] Cannot connect to {state.ip}:{state.port} — {e}")
             return False
 
-    def _disconnect(self, state: MachineState):
+    def _close_connection(self, state: MachineState):
+        """Cleanly close TCP connection without modifying machine online status."""
         if is_fk_driver(state.driver):
             state.fk_connected = False
         elif state.conn:
@@ -446,6 +447,9 @@ class ZKPullManager:
             except Exception:
                 pass
             state.conn = None
+
+    def _disconnect(self, state: MachineState):
+        self._close_connection(state)
         state.status = "offline"
 
     # ─── Sync operations ─────────────────────────────────────────────────────────
@@ -545,6 +549,8 @@ class ZKPullManager:
                 state.last_error = str(e)
                 state.status = "offline"
                 self._disconnect(state)
+            finally:
+                self._close_connection(state)
 
     def _insert_to_db(self, records, machine_ref: str, company_names: list[str]):
         """Reuse the existing zk/db.py generic insert function."""
@@ -565,12 +571,30 @@ class ZKPullManager:
         state = self._find_state(sn, ip, port)
         if not state:
             return {"success": False, "error": "Machine not found"}
-        self._pull_machine(state)
+
+        if state.status == "syncing":
+            return {
+                "success": True,
+                "message": f"Device {state.sn or state.ip} is already syncing.",
+                "records": state.last_record_count,
+                "last_sync": state.last_sync.isoformat() if state.last_sync else None,
+                "error": "",
+            }
+
+        state.status = "syncing"
+        threading.Thread(
+            target=self._pull_machine,
+            args=(state,),
+            daemon=True,
+            name=f"manual-pull-{state.ip}"
+        ).start()
+
         return {
-            "success": state.status in ("online", "syncing"),
+            "success": True,
+            "message": f"Sync started for {state.sn or state.ip}. Records will appear shortly.",
             "records": state.last_record_count,
             "last_sync": state.last_sync.isoformat() if state.last_sync else None,
-            "error": state.last_error,
+            "error": "",
         }
 
     def get_device_info(self, sn: str = "", ip: str = "", port: int = 4370) -> dict:
@@ -655,14 +679,18 @@ class ZKPullManager:
                 if is_fk_driver(state.driver):
                     ok, err = fk_bridge_client.clear_attendance(state.ip, state.port, state.config)
                     return {"success": ok, "error": err or None}
-                if not state.conn or not state.conn.is_connect:
-                    if not self._connect(state):
-                        return {"success": False, "error": state.last_error}
-                state.conn.disable_device()
+                # Always close any stale connection first
+                self._close_connection(state)
+                if not self._connect(state):
+                    return {"success": False, "error": state.last_error}
                 try:
-                    state.conn.clear_attendance()
+                    state.conn.disable_device()
+                    try:
+                        state.conn.clear_attendance()
+                    finally:
+                        state.conn.enable_device()
                 finally:
-                    state.conn.enable_device()
+                    self._close_connection(state)
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -711,14 +739,17 @@ class ZKPullManager:
                 if is_fk_driver(state.driver):
                     ok, err = fk_bridge_client.sync_time(state.ip, state.port, state.config)
                     return {"success": ok, "synced_to": datetime.now().isoformat(), "error": err or None}
-                if not state.conn or not state.conn.is_connect:
-                    if not self._connect(state):
-                        return {"success": False, "error": state.last_error}
-                state.conn.disable_device()
+                self._close_connection(state)
+                if not self._connect(state):
+                    return {"success": False, "error": state.last_error}
                 try:
-                    state.conn.set_time(datetime.now())
+                    state.conn.disable_device()
+                    try:
+                        state.conn.set_time(datetime.now())
+                    finally:
+                        state.conn.enable_device()
                 finally:
-                    state.conn.enable_device()
+                    self._close_connection(state)
             return {"success": True, "synced_to": datetime.now().isoformat()}
         except Exception as e:
             return {"success": False, "error": str(e)}
