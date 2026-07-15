@@ -1572,7 +1572,7 @@ async def get_attendance_logs(
         except Exception as e:
             logger.error(f"Error reading pull_history.json: {e}")
             
-    all_machines = machines_config.get_all_machines()
+    all_machines = pull_manager.get_all_status()
     sn_lookup = {}
     ip_lookup = {}
     for m in all_machines:
