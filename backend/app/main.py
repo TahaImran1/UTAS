@@ -1080,18 +1080,24 @@ async def get_health():
         try:
             start = time.time()
             config = db.load_latest_config(db_type)
-            if db_type == "Oracle":
-                conn = db.connect_db_oracle(config)
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1 FROM DUAL")
-                cursor.close()
-                conn.close()
-            else:
-                conn = db.connect_db_postgresql(config)
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                cursor.close()
-                conn.close()
+            conn = None
+            cursor = None
+            try:
+                if db_type == "Oracle":
+                    conn = db.connect_db_oracle(config)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1 FROM DUAL")
+                else:
+                    conn = db.connect_db_postgresql(config)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+            finally:
+                if cursor:
+                    try: cursor.close()
+                    except Exception: pass
+                if conn:
+                    try: conn.close()
+                    except Exception: pass
             db_status = "online"
             db_latency = round((time.time() - start) * 1000, 2)
         except Exception as e:
@@ -1549,7 +1555,7 @@ def manual_pull(sn: str):
 async def get_attendance_logs(
     date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),
     sn:   Optional[str] = Query(None, description="Filter by machine SN"),
-    limit: int = Query(200, description="Max rows to return")
+    limit: int = Query(5000, description="Max rows to return")
 ):
     """
     Read pull execution history from local JSON tracker file.
@@ -1566,6 +1572,17 @@ async def get_attendance_logs(
         except Exception as e:
             logger.error(f"Error reading pull_history.json: {e}")
             
+    all_machines = machines_config.get_all_machines()
+    sn_lookup = {}
+    ip_lookup = {}
+    for m in all_machines:
+        custom_name = m.get("name") or m.get("location") or ""
+        if custom_name:
+            if m.get("sn"):
+                sn_lookup[str(m.get("sn")).strip().lower()] = custom_name
+            if m.get("ip"):
+                ip_lookup[str(m.get("ip")).strip().lower()] = custom_name
+
     filtered = []
     for entry in history:
         # Date filter (entry["date"] is YYYY-MM-DD HH:MM:SS)
@@ -1574,7 +1591,27 @@ async def get_attendance_logs(
         # SN/Device filter
         if sn and sn.lower() not in entry.get("machine", "").lower():
             continue
-        filtered.append(entry)
+            
+        raw_machine = str(entry.get("machine", "")).strip()
+        resolved_name = raw_machine
+        if raw_machine.lower() in sn_lookup:
+            resolved_name = sn_lookup[raw_machine.lower()]
+        elif raw_machine.lower() in ip_lookup:
+            resolved_name = ip_lookup[raw_machine.lower()]
+        else:
+            for sn_key, c_name in sn_lookup.items():
+                if sn_key and sn_key in raw_machine.lower():
+                    resolved_name = f"{c_name} ({raw_machine})"
+                    break
+            else:
+                for ip_key, c_name in ip_lookup.items():
+                    if ip_key and ip_key in raw_machine.lower():
+                        resolved_name = f"{c_name} ({raw_machine})"
+                        break
+
+        entry_copy = dict(entry)
+        entry_copy["custom_name"] = resolved_name
+        filtered.append(entry_copy)
         
     return filtered[:limit]
 
@@ -1635,6 +1672,8 @@ async def dashboard_stats():
                 seen_keys.add(key)
                 
                 db_type = config.get("database", "Oracle")
+                conn = None
+                cursor = None
                 try:
                     if db_type == "Oracle":
                         conn = db.connect_db_oracle(config)
@@ -1645,8 +1684,6 @@ async def dashboard_stats():
                             f"SELECT COUNT(*) FROM {table} WHERE TRUNC({col_time}) = TRUNC(SYSDATE)"
                         )
                         record_count += cursor.fetchone()[0]
-                        cursor.close()
-                        conn.close()
                     elif db_type == "PostgreSQL":
                         conn = db.connect_db_postgresql(config)
                         cursor = conn.cursor()
@@ -1656,10 +1693,15 @@ async def dashboard_stats():
                             f"SELECT COUNT(*) FROM {table} WHERE DATE({col_time}) = CURRENT_DATE"
                         )
                         record_count += cursor.fetchone()[0]
-                        cursor.close()
-                        conn.close()
                 except Exception as db_err:
                     logger.error(f"Stats query failed for profile {name}: {db_err}")
+                finally:
+                    if cursor:
+                        try: cursor.close()
+                        except Exception: pass
+                    if conn:
+                        try: conn.close()
+                        except Exception: pass
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
 
@@ -1852,27 +1894,35 @@ def download_device_logs(sn: str, format: str = "csv"):
         try:
             db_type = db.get_active_db_type()
             config = db.load_latest_config(db_type)
-            if db_type == "Oracle":
-                conn = db.connect_db_oracle(config)
-            else:
-                conn = db.connect_db_postgresql(config)
-            cursor = conn.cursor()
-            
-            table = config["table"]
-            col_time = config["column2"]
-            col_mach = config["column3"]
-            col_uid = config["column1"]
-            
-            if db_type == "Oracle":
-                query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = :sn ORDER BY "{col_time}" DESC'
-                cursor.execute(query, {"sn": sn})
-            else:
-                query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = %(sn)s ORDER BY "{col_time}" DESC'
-                cursor.execute(query, {"sn": sn})
+            conn = None
+            cursor = None
+            try:
+                if db_type == "Oracle":
+                    conn = db.connect_db_oracle(config)
+                else:
+                    conn = db.connect_db_postgresql(config)
+                cursor = conn.cursor()
                 
-            rows = cursor.fetchall()
-            cursor.close()
-            conn.close()
+                table = config["table"]
+                col_time = config["column2"]
+                col_mach = config["column3"]
+                col_uid = config["column1"]
+                
+                if db_type == "Oracle":
+                    query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = :sn ORDER BY "{col_time}" DESC'
+                    cursor.execute(query, {"sn": sn})
+                else:
+                    query = f'SELECT "{col_uid}", TO_CHAR("{col_time}", \'YYYY-MM-DD HH24:MI:SS\') FROM "{table}" WHERE "{col_mach}" = %(sn)s ORDER BY "{col_time}" DESC'
+                    cursor.execute(query, {"sn": sn})
+                    
+                rows = cursor.fetchall()
+            finally:
+                if cursor:
+                    try: cursor.close()
+                    except Exception: pass
+                if conn:
+                    try: conn.close()
+                    except Exception: pass
             
             for r in rows:
                 records.append({"user_id": r[0], "timestamp": r[1]})

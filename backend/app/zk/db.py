@@ -154,6 +154,7 @@ def check_tables_exist(connection, db_type, att_table, machine_table):
     Does NOT create anything — pure read.
     """
     result = {"att_table_exists": False, "machine_table_exists": False}
+    cursor = None
     try:
         cursor = connection.cursor()
         if db_type == "Oracle":
@@ -180,15 +181,19 @@ def check_tables_exist(connection, db_type, att_table, machine_table):
                 (machine_table.lower(),)
             )
             result["machine_table_exists"] = cursor.fetchone() is not None
-        cursor.close()
     except Exception as e:
         logging.error(f"check_tables_exist error: {e}")
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
     return result
 
 
 def get_table_columns(connection, db_type, table_name):
     """Fetch column names for a given table from DB metadata."""
     columns = []
+    cursor = None
     try:
         cursor = connection.cursor()
         if db_type == "Oracle":
@@ -202,9 +207,12 @@ def get_table_columns(connection, db_type, table_name):
                 (table_name.lower(),)
             )
         columns = [row[0] for row in cursor.fetchall()]
-        cursor.close()
     except Exception as e:
         logging.error(f"Error fetching columns for {table_name}: {e}")
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
     return columns
 
 
@@ -220,8 +228,9 @@ def create_attendance_table(connection, db_type, config):
     col2    = config["column2"]
     col3    = config["column3"]
     col4    = config.get("column4", "")
-    cursor  = connection.cursor()
+    cursor  = None
     try:
+        cursor = connection.cursor()
         if db_type == "Oracle":
             # Check if table exists
             cursor.execute("SELECT count(*) FROM user_tables WHERE table_name = :tn", {"tn": table})
@@ -284,12 +293,14 @@ def create_attendance_table(connection, db_type, config):
             else:
                 logging.info(f"PostgreSQL table {table} already exists. Skipping creation.")
         connection.commit()
-        cursor.close()
         return True
     except Exception as e:
         logging.error(f"create_attendance_table error: {e}")
-        cursor.close()
         raise
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
 
 
 def create_machine_table(connection, db_type, table_name, col_sn, col_ip, col_proto, col_company):
@@ -297,8 +308,9 @@ def create_machine_table(connection, db_type, table_name, col_sn, col_ip, col_pr
     Create the machine-link table with user-supplied column names.
     """
     tbl    = table_name.upper() if db_type == "Oracle" else table_name.lower()
-    cursor = connection.cursor()
+    cursor = None
     try:
+        cursor = connection.cursor()
         if db_type == "Oracle":
             cursor.execute(f"""
                 CREATE TABLE {tbl} (
@@ -318,15 +330,19 @@ def create_machine_table(connection, db_type, table_name, col_sn, col_ip, col_pr
                 )
             """)
         connection.commit()
-        cursor.close()
         return True
     except Exception as e:
         logging.error(f"create_machine_table error: {e}")
-        cursor.close()
         raise
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
+
 
 def ensure_tables(connection, db_type, config):
     """Verifies that required tables exist, and creates them if they don't."""
+    cursor = None
     try:
         cursor = connection.cursor()
         
@@ -415,10 +431,13 @@ def ensure_tables(connection, db_type, config):
                 """)
 
         connection.commit()
-        cursor.close()
     except Exception as e:
         logging.error(f"Error ensuring tables: {e}")
         # Non-fatal error, but log it
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
 
 def load_latest_config(selected_db_type):
     # Try reading from database.json first
@@ -462,6 +481,13 @@ def load_latest_config(selected_db_type):
 
 
 oracle_pools = {}
+_verified_tables_cache = set()
+
+def ensure_tables_cached(connection, db_type, config):
+    key = f"{db_type}:{config.get('host')}:{config.get('port')}:{config.get('dbname')}:{config.get('username')}:{config.get('table')}"
+    if key not in _verified_tables_cache:
+        ensure_tables(connection, db_type, config)
+        _verified_tables_cache.add(key)
 
 def get_oracle_pool(config):
     global oracle_pools
@@ -473,9 +499,10 @@ def get_oracle_pool(config):
                 user=config['username'], 
                 password=config['password'], 
                 dsn=dsn_tns,
-                min=2,
-                max=50,          # Allow up to 50 concurrent DB connections
-                increment=2      # Grow by 2 connections at a time if busy
+                min=0,           # Do not hold idle sessions open when inactive
+                max=10,          # Cap max concurrent sessions per schema to 10
+                increment=1,     # Grow by 1 connection at a time if busy
+                timeout=30       # Automatically close physical Oracle sessions after 30 seconds idle
             )
             oracle_pools[key] = pool
             logging.info(f"Oracle Connection Pool created successfully for {key}.")
@@ -489,7 +516,7 @@ def connect_db_oracle(config):
     pool = get_oracle_pool(config)
     try:
         connection = pool.acquire()
-        ensure_tables(connection, "Oracle", config)
+        ensure_tables_cached(connection, "Oracle", config)
         return connection
     except Exception as error:
         error_msg = f"Error acquiring connection from Oracle pool: {error}"
@@ -506,7 +533,7 @@ def connect_db_postgresql(config):
             password=config['password'],
             dbname=config['dbname']
         )
-        ensure_tables(conn, "PostgreSQL", config)
+        ensure_tables_cached(conn, "PostgreSQL", config)
         return conn
     except Exception as error:
         logging.error(f"PostgreSQL connection error: {error}")
@@ -571,6 +598,7 @@ def insert_log_generic(records, machine_ref, company_names: list[str], bypass_of
 
 def insert_log_postgresql(connection, attendance_records, machine_info, config):
     """Inserts logs into PostgreSQL."""
+    cursor = None
     try:
         cursor = connection.cursor()
         table = config['table']
@@ -586,10 +614,13 @@ def insert_log_postgresql(connection, attendance_records, machine_info, config):
             
         cursor.executemany(query, batch_data)
         connection.commit()
-        cursor.close()
     except Exception as e:
         logging.error(f"PostgreSQL insert error: {e}")
         raise
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
 
 def insert_log_oracle(connection, attendance_records, machine_info, config):
     """
@@ -597,6 +628,9 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
     Uses INSERT...SELECT...WHERE NOT EXISTS to prevent duplicates.
     """
     rows_inserted = 0
+    cursor = None
+    count_cursor = None
+    count_cursor2 = None
     try:
         cursor = connection.cursor()
 
@@ -687,6 +721,7 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         count_cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
         count_before = count_cursor.fetchone()[0]
         count_cursor.close()
+        count_cursor = None
 
         # Execute all records in a single batch
         cursor.executemany(query, batch_data)
@@ -697,15 +732,25 @@ def insert_log_oracle(connection, attendance_records, machine_info, config):
         count_cursor2.execute(f'SELECT COUNT(*) FROM "{table}"')
         count_after = count_cursor2.fetchone()[0]
         count_cursor2.close()
+        count_cursor2 = None
 
         rows_inserted = count_after - count_before
         skipped = len(batch_data) - rows_inserted
-        cursor.close()
 
     except Exception as error:
         error_msg = f"Error inserting log data: {error}"
         logging.error(error_msg)
         raise Exception(error_msg)
+    finally:
+        if count_cursor:
+            try: count_cursor.close()
+            except Exception: pass
+        if count_cursor2:
+            try: count_cursor2.close()
+            except Exception: pass
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
 
     print('Data Inserted Successfully')
     print(f"Number of entries inserted: {rows_inserted} (skipped as duplicates: {skipped})")

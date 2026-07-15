@@ -19,7 +19,7 @@ export default function AttendanceLogs() {
   const fetchLogs = async () => {
     setLoading(true)
     try {
-      const res = await getAttendanceLogs({ date: dateFilter, sn: snFilter })
+      const res = await getAttendanceLogs({ date: dateFilter, sn: snFilter, limit: 5000 })
       setLogs(res.data)
       await checkOfflineLogsStatus()
     } catch (err) {
@@ -162,7 +162,12 @@ export default function AttendanceLogs() {
                logs.map((log, i) => (
                 <tr key={i} className="present">
                   <td style={{fontWeight: 600}}>{log.date}</td>
-                  <td style={{color: 'var(--color-text)'}}>{log.machine}</td>
+                  <td style={{color: 'var(--color-text)'}}>
+                    <div style={{fontWeight: 600}}>{log.custom_name || log.machine}</div>
+                    {log.custom_name && log.custom_name !== log.machine && (
+                      <div style={{fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '2px'}}>{log.machine}</div>
+                    )}
+                  </td>
                   <td style={{color: 'var(--color-text-muted)'}}>{log.company}</td>
                   <td style={{color: 'var(--color-text-muted)', fontFamily: 'monospace'}}>{log.profile}</td>
                   <td style={{fontWeight: 700, color: 'var(--color-accent)'}}>{log.count} logs</td>
