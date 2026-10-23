@@ -7,7 +7,7 @@ if exist requirements.txt (
 echo.
 echo Starting UTAS (ZKTeco ADMS Server)...
 echo ---------------------------------------------------
-echo Web Viewer:  http://localhost:4370/view
+echo Web Viewer:  http://localhost:4375/view
 echo.
 echo YOUR CURRENT IP ADDRESS(ES):
 ipconfig | findstr "IPv4"

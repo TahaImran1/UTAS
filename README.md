@@ -53,10 +53,10 @@ run_server.bat
 ```bash
 python app/main.py
 ```
-The server will start on port **4370**. Note the IP address displayed in the console.
+The server will start on port **4375**. Note the IP address displayed in the console.
 
 > [!CAUTION]
-> **Firewall Configuration**: You MUST allow inbound traffic on TCP port **4370** in your Windows Firewall or any other antivirus/security software. If this port is blocked, the machine will not be able to connect to your server.
+> **Firewall Configuration**: You MUST allow inbound traffic on TCP port **4375** in your Windows Firewall or any other antivirus/security software. If this port is blocked, the machine will not be able to connect to your server.
 
 ### 4. Configure ZKTeco Machine (ADMS)
 Follow these steps on your physical attendance device to connect it to this server:
@@ -65,14 +65,14 @@ Follow these steps on your physical attendance device to connect it to this serv
 2.  **Network Settings**: Navigate to **Comm.** -> **Ethernet** and ensure the device has a valid IP address on your local network.
 3.  **Cloud Server/ADMS Settings**: Go to **Comm.** -> **Cloud Server Setting** (or **ADMS** on some models).
 4.  **Server Address**: Enter the **IP Address** of the computer running this backend (e.g., `192.168.100.31`).
-5.  **Server Port**: Enter `4370`.
+5.  **Server Port**: Enter `4375`.
 6.  **Enable Domain Name**: Set to **OFF**.
 7.  **HTTPS**: Set to **OFF**.
 8.  **Sync Data**: Ensure the device shows a "Connected" icon (usually a cloud symbol with a green check or arrows).
 
 ### 5. View Logs
 Open your browser to see live records being received from the device:
-👉 **http://localhost:4370/view**
+👉 **http://localhost:4375/view**
 
 ## Project Structure
 ```text

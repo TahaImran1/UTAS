@@ -219,7 +219,7 @@ async def health_monitor_middleware(request: Request, call_next):
     
     return response
 
-SERVER_PORT = int(os.getenv("SERVER_PORT", 4370))
+SERVER_PORT = int(os.getenv("SERVER_PORT", 4375))
 
 # â”€â”€ In-memory push log (Phase 1 viewer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 RECENT_LOGS = []

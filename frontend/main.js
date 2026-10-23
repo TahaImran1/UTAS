@@ -46,8 +46,8 @@ function ensureEnv() {
 
 // ── Firewall port helper ──────────────────────────────────────────────────────
 const REQUIRED_PORTS = [
-  { port: 4370, proto: 'TCP', name: 'UTAS-4370-TCP' },
-  { port: 4370, proto: 'UDP', name: 'UTAS-4370-UDP' },
+  { port: 4375, proto: 'TCP', name: 'UTAS-4375-TCP' },
+  { port: 4375, proto: 'UDP', name: 'UTAS-4375-UDP' },
   { port: 5001, proto: 'TCP', name: 'UTAS-5001-TCP' },
 ]
 

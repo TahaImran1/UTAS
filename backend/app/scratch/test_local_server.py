@@ -2,7 +2,7 @@ import requests
 import struct
 import json
 
-url = "http://127.0.0.1:4370/iclock/cdata"
+url = "http://127.0.0.1:4375/iclock/cdata"
 headers = {
     "dev_id": "AMT602511730",
     "request_code": "realtime_enroll_data",

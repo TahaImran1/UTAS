@@ -10,13 +10,15 @@ RequestExecutionLevel admin
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS ADMS Port"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4370-TCP"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4370-UDP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4375-TCP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4375-UDP"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-5001-TCP"'
 
-  ; Port 4370 TCP — ZKTeco ADMS push receiver + API
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UTAS-4370-TCP" dir=in action=allow protocol=TCP localport=4370 profile=any enable=yes'
+  ; Port 4375 TCP — ZKTeco ADMS push receiver + API
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UTAS-4375-TCP" dir=in action=allow protocol=TCP localport=4375 profile=any enable=yes'
 
-  ; Port 4370 UDP — ZKTeco device keepalive / time sync
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UTAS-4370-UDP" dir=in action=allow protocol=UDP localport=4370 profile=any enable=yes'
+  ; Port 4375 UDP — ZKTeco device keepalive / time sync
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UTAS-4375-UDP" dir=in action=allow protocol=UDP localport=4375 profile=any enable=yes'
 
   ; Port 5001 TCP — FK Bridge internal HTTP (backend ↔ FkBridge.exe)
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="UTAS-5001-TCP" dir=in action=allow protocol=TCP localport=5001 profile=any enable=yes'
@@ -29,6 +31,8 @@ RequestExecutionLevel admin
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS ADMS Port"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4370-TCP"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4370-UDP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4375-TCP"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-4375-UDP"'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="UTAS-5001-TCP"'
   DetailPrint "Firewall rules removed."
 
