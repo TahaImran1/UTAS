@@ -11,6 +11,8 @@ from typing import Optional, List
 
 # â”€â”€ Auto-install dependencies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def install_requirements():
+    if getattr(sys, 'frozen', False):
+        return
     req_path = os.path.join(os.path.dirname(__file__), "..", "requirements.txt")
     if os.path.exists(req_path):
         print(f"[*] Checking/Installing dependencies...")
