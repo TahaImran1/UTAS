@@ -1,12 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
 
+datas_crypto, binaries_crypto, hiddenimports_crypto = collect_all('cryptography')
+datas_oracle, binaries_oracle, hiddenimports_oracle = collect_all('oracledb')
+
+base_hidden = [
+    'auth_helper',
+    'uvicorn',
+    'fastapi',
+    'psycopg2',
+    'passlib.handlers.bcrypt',
+    'bcrypt',
+    'cryptography.hazmat.primitives.ciphers.aead',
+]
+all_hidden = list(set(base_hidden + hiddenimports_crypto + hiddenimports_oracle))
+all_datas = datas_crypto + datas_oracle
+all_binaries = binaries_crypto + binaries_oracle
 
 a = Analysis(
     ['app\\main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['auth_helper', 'uvicorn', 'fastapi', 'psycopg2', 'oracledb', 'passlib.handlers.bcrypt', 'bcrypt', 'cryptography', 'cryptography.hazmat.primitives.kdf', 'cryptography.hazmat.primitives.kdf.pbkdf2'],
+    binaries=all_binaries,
+    datas=all_datas,
+    hiddenimports=all_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
