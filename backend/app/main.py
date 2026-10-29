@@ -825,9 +825,29 @@ async def receive_cdata(
                     break
 
     register_push_device(SN, ip)
+    if SN:
+        pull_manager.update_pulse(SN)
 
     if request.method == 'GET':
-        log(f"Device {SN} Heartbeat (GET) from {ip}")
+        log(f"Device {SN} Heartbeat/Handshake (GET) from {ip}")
+        params = dict(request.query_params)
+        if 'options' in params or 'pushver' in params:
+            response_text = (
+                f"GET OPTION FROM: {SN}\r\n"
+                f"Stamp=9999\r\n"
+                f"OpStamp=9999\r\n"
+                f"PhotoStamp=9999\r\n"
+                f"ErrorDelay=60\r\n"
+                f"Delay=30\r\n"
+                f"TransTimes=00:00;14:00\r\n"
+                f"TransInterval=1\r\n"
+                f"TransFlag=1111000000\r\n"
+                f"TimeZone=5\r\n"
+                f"Realtime=1\r\n"
+                f"Encrypt=0\r\n"
+                f"ServerVer=3.4.1\r\n"
+            )
+            return PlainTextResponse(response_text)
         return "OK"
     if table == 'ATTLOG':
         log(f"Received ATTLOG from {SN}")
@@ -836,7 +856,7 @@ async def receive_cdata(
             return "OK"
         except Exception as e:
             logger.error(f"Failed to process ATTLOG for standard ADMS device {SN}: {e}")
-            raise HTTPException(status_code=500, detail=f"Database insertion failed: {e}")
+            pass
     elif table == 'OPERLOG':
         return "OK"
 
@@ -898,6 +918,7 @@ async def get_request(request: Request, SN: Optional[str] = Query(None)):
             logger.warning(f"[ACCESS DENIED] getrequest from disabled machine SN={SN} rejected.")
             return Response(content="DISABLED", status_code=403)
         register_push_device(SN, ip, fk_protocol=False)
+        pull_manager.update_pulse(SN)
         log(f"Device {SN} getrequest from {ip}")
         
         info_param = request.query_params.get("INFO")
@@ -924,6 +945,7 @@ async def device_registry(request: Request, SN: Optional[str] = Query(None)):
     dev_id = request.headers.get("dev_id") or SN
     if dev_id:
         register_push_device(dev_id, ip, fk_protocol=False)
+        pull_manager.update_pulse(dev_id)
         log(f"[ADMS REGISTRY] Registered {dev_id} from {ip}")
     return "RegistryCode=OK"
 
@@ -934,6 +956,7 @@ async def device_ping(request: Request, SN: Optional[str] = Query(None)):
     dev_id = request.headers.get("dev_id") or SN
     if dev_id:
         register_push_device(dev_id, ip, fk_protocol=False)
+        pull_manager.update_pulse(dev_id)
         log(f"[ADMS PING] Ping from {dev_id} at {ip}")
     return "OK"
 
@@ -944,6 +967,7 @@ async def device_push(request: Request, SN: Optional[str] = Query(None)):
     dev_id = request.headers.get("dev_id") or SN
     if dev_id:
         register_push_device(dev_id, ip, fk_protocol=False)
+        pull_manager.update_pulse(dev_id)
         log(f"[ADMS PUSH] Push from {dev_id} at {ip}")
     return "OK"
 
@@ -1541,7 +1565,8 @@ def manual_pull(sn: str):
         else:
             end_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cmd = f"C:101:DATA QUERY ATTLOG StartTime=2000-01-01 00:00:00\tEndTime={end_ts}"
-            COMMAND_QUEUE[sn].append(cmd)
+            if not any("DATA QUERY ATTLOG" in c for c in COMMAND_QUEUE[sn]):
+                COMMAND_QUEUE[sn].append(cmd)
             logger.info(f"[ZK PUSH] Queued DATA QUERY ATTLOG (full history) for {sn}")
         return {
             "success": True,
